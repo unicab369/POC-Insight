@@ -21,13 +21,14 @@
 		orientation?: 'horizontal' | 'vertical';
 		spacing?: number;
 		type?: 'line' | 'stack';
+		cardWidth?: number;
 	}
 
-	let { steps, dotColor = '#818cf8', alternating = false, orientation = 'horizontal', spacing = 40, type = 'line' }: Props = $props();
+	let { steps, dotColor = '#818cf8', alternating = false, orientation = 'horizontal', spacing = 40, type = 'line', cardWidth = 208 }: Props = $props();
 
 	function dotClasses(hasIndicator: boolean) {
 		const size = hasIndicator ? 'w-7 h-7' : 'w-4 h-4';
-		return `${size} shrink-0 rounded-full ring-4 ring-slate-800 flex items-center justify-center`;
+		return `${size} shrink-0 rounded-full ring-4 ring-slate-800 flex items-center justify-center z-10`;
 	}
 </script>
 
@@ -44,8 +45,9 @@
 
 {#snippet stepCard(step: TimelineStep, align: 'left' | 'center' | 'right')}
 	<div
-		class="max-w-52 bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-2
+		class="bg-slate-800/60 border border-slate-700/50 rounded-lg px-3 py-2 h-full
 			{align === 'center' ? 'text-center' : align === 'right' ? 'text-right ml-auto' : 'text-left mr-auto'}"
+		style="width: {cardWidth}px;"
 	>
 		{#if step.icon && iconPaths[step.icon]}
 			<svg
@@ -70,7 +72,7 @@
 		<div class="overflow-x-auto">
 			<div class="flex min-w-max px-4 py-6" style="gap: {spacing}px;">
 				{#each steps as step}
-					<div class="flex flex-col items-stretch bg-slate-800/60 border border-slate-700/50 rounded-lg overflow-hidden w-48">
+					<div class="flex flex-col items-stretch bg-slate-800/60 border border-slate-700/50 rounded-lg overflow-hidden" style="width: {cardWidth}px;">
 						<!-- Indicator strip (top) -->
 						<div
 							class="flex items-center justify-center gap-2 py-3 shrink-0"
@@ -95,7 +97,7 @@
 						</div>
 
 						<!-- Content -->
-						<div class="p-3 min-w-0">
+						<div class="p-3 min-w-0 flex-1">
 							<p class="text-sm font-bold text-slate-200">{step.label}</p>
 							<p class="text-xs text-slate-400 mt-0.5 leading-relaxed">{step.description}</p>
 						</div>
@@ -142,22 +144,18 @@
 {:else if orientation === 'vertical'}
 	{#if alternating}
 		<!-- Vertical alternating: labels alternate left/right -->
-		<div class="relative px-4 py-6">
-			<div class="grid" style="grid-template-columns: 1fr auto 1fr;">
-				<div></div>
-				<!-- Continuous vertical line behind dots -->
-				<div class="flex justify-center">
-					<div class="absolute w-0.5 bg-slate-600" style="top: calc(1.5rem + {spacing / 2}px); bottom: calc(1.5rem + {spacing / 2}px);"></div>
-				</div>
-				<div></div>
-			</div>
+		<div class="px-4 py-6">
 			<div class="relative flex flex-col" style="gap: {spacing}px;">
+				<!-- Continuous vertical line inside flex container: top=0 to bottom=0 -->
+				<div class="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-0.5 bg-slate-600"></div>
 				{#each steps as step, i}
 					{@const left = i % 2 === 0}
-					<div class="grid" style="grid-template-columns: 1fr auto 1fr;">
+					<div class="relative grid shrink-0 w-full" style="height: 0; grid-template-columns: 1fr auto 1fr;">
 						<!-- Left label area -->
 						<div class="flex items-center justify-end pr-3 {left ? '' : 'invisible'}">
-							{@render stepCard(step, 'right')}
+							<div class="h-max">
+								{@render stepCard(step, 'right')}
+							</div>
 						</div>
 
 						<!-- Dot -->
@@ -167,7 +165,9 @@
 
 						<!-- Right label area -->
 						<div class="flex items-center pl-3 {left ? 'invisible' : ''}">
-							{@render stepCard(step, 'left')}
+							<div class="h-max">
+								{@render stepCard(step, 'left')}
+							</div>
 						</div>
 					</div>
 				{/each}
@@ -175,18 +175,12 @@
 		</div>
 	{:else}
 		<!-- Vertical non-alternating: labels all on the right -->
-		<div class="relative px-4 py-6">
-			<div class="grid w-full" style="grid-template-columns: 1fr auto 1fr;">
-				<div></div>
-				<!-- Continuous vertical line behind dots -->
-				<div class="flex justify-center">
-					<div class="absolute w-0.5 bg-slate-600" style="top: calc(1.5rem + {spacing / 2}px); bottom: calc(1.5rem + {spacing / 2}px);"></div>
-				</div>
-				<div></div>
-			</div>
+		<div class="px-4 py-6">
 			<div class="relative flex flex-col items-center" style="gap: {spacing}px;">
+				<!-- Continuous vertical line inside flex container: top=0 to bottom=0 -->
+				<div class="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-0.5 bg-slate-600"></div>
 				{#each steps as step, i}
-					<div class="grid w-full" style="grid-template-columns: 1fr auto 1fr;">
+					<div class="relative grid w-full" style="grid-template-columns: 1fr auto 1fr;">
 						<!-- Left spacer -->
 						<div></div>
 
@@ -208,44 +202,42 @@
 	<!-- Horizontal orientation -->
 	<div class="overflow-x-auto">
 		{#if alternating}
-			<div class="flex items-stretch min-w-max px-4 py-6">
-				{#each steps as step, i}
-					{@const above = i % 2 === 0}
-					<div
-						class="flex-1 grid"
-						style="min-width: {spacing * 3}px; grid-template-rows: 1fr auto 1fr;"
-					>
-						<!-- Top label area -->
-						<div class="px-2 self-end pb-3 flex justify-center {above ? '' : 'invisible'}">
-							{@render stepCard(step, 'center')}
-						</div>
+			<div class="px-4 py-6">
+				<div class="relative flex items-stretch w-fit mx-auto" style="gap: {spacing}px;">
+					<!-- Continuous horizontal line inside flex container: left=0 to right=0 -->
+					<div class="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-0.5 bg-slate-600"></div>
+					{#each steps as step, i}
+						{@const above = i % 2 === 0}
+						<div
+							class="grid shrink-0"
+							style="width: 0; grid-template-rows: 1fr auto 1fr;"
+						>
+							<!-- Top label area -->
+							<div class="self-end pb-3 flex justify-center {above ? '' : 'invisible'}">
+								<div class="w-max">
+									{@render stepCard(step, 'center')}
+								</div>
+							</div>
 
-						<!-- Dot + line segment -->
-						<div class="flex items-center w-full">
-							<div
-								class="h-0.5 flex-1"
-								class:bg-slate-600={i > 0}
-								class:bg-transparent={i === 0}
-							></div>
-							{@render dotMarker(step)}
-							<div
-								class="h-0.5 flex-1"
-								class:bg-slate-600={i < steps.length - 1}
-								class:bg-transparent={i === steps.length - 1}
-							></div>
-						</div>
+							<!-- Dot -->
+							<div class="flex items-center justify-center">
+								{@render dotMarker(step)}
+							</div>
 
-						<!-- Bottom label area -->
-						<div class="px-2 self-start pt-3 flex justify-center {above ? 'invisible' : ''}">
-							{@render stepCard(step, 'center')}
+							<!-- Bottom label area -->
+							<div class="self-start pt-3 flex justify-center {above ? 'invisible' : ''}">
+								<div class="w-max">
+									{@render stepCard(step, 'center')}
+								</div>
+							</div>
 						</div>
-					</div>
-				{/each}
+					{/each}
+				</div>
 			</div>
 		{:else}
-			<div class="flex items-start min-w-max px-4 py-6">
+			<div class="flex items-stretch min-w-max px-4 py-6">
 				{#each steps as step, i}
-					<div class="flex items-start flex-1" style="min-width: {spacing * 3}px;">
+					<div class="flex items-stretch flex-1" style="min-width: {spacing * 3}px;">
 						<div class="flex flex-col items-center w-full">
 							<!-- Dot + line segment -->
 							<div class="flex items-center w-full">
@@ -262,7 +254,7 @@
 								></div>
 							</div>
 							<!-- Label + description -->
-							<div class="mt-3 px-2 flex justify-center">
+							<div class="mt-3 px-2 flex justify-center flex-1">
 								{@render stepCard(step, 'center')}
 							</div>
 						</div>

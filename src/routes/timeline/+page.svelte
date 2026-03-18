@@ -8,7 +8,8 @@
 	let timelineColor = $state('#818cf8');
 	let timelineAlternating = $state(false);
 	let timelineOrientation = $state<'horizontal' | 'vertical'>('horizontal');
-	let timelineSpacing = $state(40);
+	let timelineSpacing = $state(200);
+	let timelineCardWidth = $state(208);
 </script>
 
 <Header title="Timeline" description="Progress timeline component with live preview" />
@@ -93,9 +94,27 @@
 				</div>
 				<input
 					type="range"
-					min="10"
-					max="100"
+					min="0"
+					max="300"
 					bind:value={timelineSpacing}
+					class="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-slate-700
+						[&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4
+						[&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-indigo-400
+						[&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:shadow-md"
+				/>
+			</div>
+
+			<!-- Card Width -->
+			<div class="space-y-2">
+				<div class="flex items-center justify-between">
+					<span class="text-xs text-slate-400 font-medium uppercase tracking-wider">Card Width</span>
+					<span class="text-xs text-slate-300 tabular-nums">{timelineCardWidth}px</span>
+				</div>
+				<input
+					type="range"
+					min="150"
+					max="300"
+					bind:value={timelineCardWidth}
 					class="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-slate-700
 						[&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4
 						[&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-indigo-400
@@ -114,6 +133,7 @@
 				alternating={timelineAlternating}
 				orientation={timelineOrientation}
 				spacing={timelineSpacing}
+				cardWidth={timelineCardWidth}
 			/>
 		</div>
 	</div>
