@@ -107,3 +107,11 @@ export const medalCount = [
 	{ label: 'Japan', value: 58, color: '#dc2626' },
 	{ label: 'Australia', value: 46, color: '#22c55e' }
 ];
+
+export const projectSteps = [
+	{ indicator: '1', icon: 'search', label: 'Research', description: 'Conduct in-depth market analysis, competitor benchmarking, and stakeholder interviews to identify key pain points and validate the product hypothesis before moving forward' },
+	{ indicator: '2', icon: 'pen-tool', label: 'Design', description: 'Create low-fidelity wireframes, interactive prototypes, and a comprehensive design system covering typography, color palette, spacing, and reusable component patterns for consistency' },
+	{ indicator: '3', icon: 'code', label: 'Develop', description: 'Build the frontend with SvelteKit and Tailwind CSS, implement REST API endpoints, set up the database schema, and integrate third-party services for authentication and payments' },
+	{ indicator: '4', icon: 'check-circle', label: 'Test', description: 'Run automated unit and integration test suites, perform manual QA across browsers and devices, conduct user acceptance testing sessions, and resolve all critical and major defects' },
+	{ indicator: '5', icon: 'rocket', label: 'Launch', description: 'Deploy to production infrastructure with CI/CD pipelines, configure monitoring and alerting dashboards, execute the go-to-market communications plan, and begin collecting user feedback' }
+];

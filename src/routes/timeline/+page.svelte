@@ -2,26 +2,13 @@
 	import Header from '$lib/components/layout/Header.svelte';
 	import ProgressTimeline from '$lib/components/layout/ProgressTimeline.svelte';
 	import { chartPalette } from '$lib/utils/colors';
+	import { projectSteps } from '$lib/data/samples';
 
-	let timelineShape = $state<'circle' | 'square' | 'diamond'>('circle');
+	let timelineType = $state<'line' | 'stack'>('line');
 	let timelineColor = $state('#818cf8');
 	let timelineAlternating = $state(false);
 	let timelineOrientation = $state<'horizontal' | 'vertical'>('horizontal');
-	let timelineLineLength = $state(40);
-
-	const shapes: Array<{ value: 'circle' | 'square' | 'diamond'; label: string }> = [
-		{ value: 'circle', label: 'Circle' },
-		{ value: 'square', label: 'Square' },
-		{ value: 'diamond', label: 'Diamond' }
-	];
-
-	const projectSteps = [
-		{ label: 'Step 1: Research', description: 'Market analysis and user interviews' },
-		{ label: 'Step 2: Design', description: 'Wireframes and prototypes' },
-		{ label: 'Step 3: Develop', description: 'Frontend and backend implementation' },
-		{ label: 'Step 4: Test', description: 'QA and user acceptance testing' },
-		{ label: 'Step 5: Launch', description: 'Production deployment' }
-	];
+	let timelineSpacing = $state(40);
 </script>
 
 <Header title="Timeline" description="Progress timeline component with live preview" />
@@ -31,6 +18,23 @@
 		<!-- Settings panel -->
 		<div class="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-6 h-fit">
 			<h3 class="text-sm font-semibold text-slate-200">Settings</h3>
+
+			<!-- Type -->
+			<div class="space-y-2">
+				<span class="text-xs text-slate-400 font-medium uppercase tracking-wider">Type</span>
+				<div class="flex gap-2">
+					{#each [{ value: 'line', label: 'Line' }, { value: 'stack', label: 'Stack' }] as t}
+						<button
+							class="flex-1 px-3 py-2 text-xs rounded-lg transition-all {timelineType === t.value
+								? 'bg-slate-700 text-white ring-2 ring-indigo-400'
+								: 'bg-slate-800 text-slate-400 hover:text-slate-200'}"
+							onclick={() => (timelineType = t.value as 'line' | 'stack')}
+						>
+							{t.label}
+						</button>
+					{/each}
+				</div>
+			</div>
 
 			<!-- Orientation -->
 			<div class="space-y-2">
@@ -44,23 +48,6 @@
 							onclick={() => (timelineOrientation = o.value as 'horizontal' | 'vertical')}
 						>
 							{o.label}
-						</button>
-					{/each}
-				</div>
-			</div>
-
-			<!-- Shape -->
-			<div class="space-y-2">
-				<span class="text-xs text-slate-400 font-medium uppercase tracking-wider">Shape</span>
-				<div class="flex gap-2">
-					{#each shapes as s}
-						<button
-							class="flex-1 px-3 py-2 text-xs rounded-lg transition-all {timelineShape === s.value
-								? 'bg-slate-700 text-white ring-2 ring-indigo-400'
-								: 'bg-slate-800 text-slate-400 hover:text-slate-200'}"
-							onclick={() => (timelineShape = s.value)}
-						>
-							{s.label}
 						</button>
 					{/each}
 				</div>
@@ -83,17 +70,37 @@
 				</div>
 			</div>
 
-			<!-- Alternating -->
+			<!-- Alternating (Line type only) -->
+			{#if timelineType === 'line'}
+				<div class="space-y-2">
+					<span class="text-xs text-slate-400 font-medium uppercase tracking-wider">Alternating</span>
+					<button
+						class="w-full px-3 py-2 text-xs rounded-lg transition-all {timelineAlternating
+							? 'bg-indigo-500 text-white ring-2 ring-indigo-400'
+							: 'bg-slate-800 text-slate-400 hover:text-slate-200'}"
+						onclick={() => (timelineAlternating = !timelineAlternating)}
+					>
+						{timelineAlternating ? 'On' : 'Off'}
+					</button>
+				</div>
+			{/if}
+
+			<!-- Spacing -->
 			<div class="space-y-2">
-				<span class="text-xs text-slate-400 font-medium uppercase tracking-wider">Alternating</span>
-				<button
-					class="w-full px-3 py-2 text-xs rounded-lg transition-all {timelineAlternating
-						? 'bg-indigo-500 text-white ring-2 ring-indigo-400'
-						: 'bg-slate-800 text-slate-400 hover:text-slate-200'}"
-					onclick={() => (timelineAlternating = !timelineAlternating)}
-				>
-					{timelineAlternating ? 'On' : 'Off'}
-				</button>
+				<div class="flex items-center justify-between">
+					<span class="text-xs text-slate-400 font-medium uppercase tracking-wider">Spacing</span>
+					<span class="text-xs text-slate-300 tabular-nums">{timelineSpacing}px</span>
+				</div>
+				<input
+					type="range"
+					min="10"
+					max="100"
+					bind:value={timelineSpacing}
+					class="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-slate-700
+						[&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4
+						[&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-indigo-400
+						[&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:shadow-md"
+				/>
 			</div>
 		</div>
 
@@ -102,10 +109,11 @@
 			<h3 class="text-sm font-semibold text-slate-200 mb-4">Preview</h3>
 			<ProgressTimeline
 				steps={projectSteps}
+				type={timelineType}
 				dotColor={timelineColor}
-				shape={timelineShape}
 				alternating={timelineAlternating}
 				orientation={timelineOrientation}
+				spacing={timelineSpacing}
 			/>
 		</div>
 	</div>
