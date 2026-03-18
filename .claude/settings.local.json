@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/macbookpro/Documents/Code/POC-Apps/POC-Insight log --oneline -5)",
+      "WebSearch",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:www.chartjs.org)",
+      "Bash(npx sv create:*)",
+      "Bash(npm install:*)",
+      "Bash(npx vite build:*)",
+      "Bash(timeout 10 npx vite dev:*)",
+      "Bash(npm uninstall:*)"
+    ]
+  }
+}
