@@ -29,6 +29,21 @@
 		height: number;
 	}
 
+	interface SlideShape {
+		id: number;
+		type: 'line' | 'arrow' | 'square' | 'rounded-square' | 'circle' | 'triangle' | 'diamond' | 'star';
+		x: number;
+		y: number;
+		width: number;
+		height: number;
+		text: string;
+		fillColor: string;
+		borderColor: string;
+		borderWidth: number;
+		textColor: string;
+		fontSize: number;
+	}
+
 	interface Slide {
 		id: number;
 		title: string;
@@ -36,6 +51,7 @@
 		isLanding: boolean;
 		images: SlideImage[];
 		textboxes: TextBox[];
+		shapes: SlideShape[];
 	}
 
 	const STORAGE_KEY = 'poc-slideshow';
@@ -53,12 +69,18 @@
 	let nextId = $state(saved?.nextId ?? 2);
 	let nextImageId = $state(saved?.nextImageId ?? 1);
 	let nextTextboxId = $state(saved?.nextTextboxId ?? 1);
+	let nextShapeId = $state(saved?.nextShapeId ?? 1);
 	let slides = $state<Slide[]>(
 		saved?.slides ?? [
-			{ id: 1, title: 'Welcome to the Presentation', description: 'Click to edit this description', isLanding: true, images: [], textboxes: [] }
+			{ id: 1, title: 'Welcome to the Presentation', description: 'Click to edit this description', isLanding: true, images: [], textboxes: [], shapes: [] }
 		]
 	);
 	let selectedSlideId = $state(saved?.selectedSlideId ?? 1);
+
+	// Ensure shapes array exists on all slides (migration from old data)
+	for (const s of slides) {
+		if (!s.shapes) s.shapes = [];
+	}
 
 	$effect(() => {
 		const data = {
@@ -66,7 +88,8 @@
 			selectedSlideId,
 			nextId,
 			nextImageId,
-			nextTextboxId
+			nextTextboxId,
+			nextShapeId
 		};
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 	});
@@ -75,6 +98,7 @@
 	// Image selection state
 	let selectedImageId = $state<number | null>(null);
 	let activeImageId = $state<number | null>(null);
+	let imageToolbarAnchorRect = $state<{ top: number; left: number; width: number } | null>(null);
 	let showCameraModal = $state(false);
 	let videoEl = $state<HTMLVideoElement | null>(null);
 	let canvasEl = $state<HTMLCanvasElement | null>(null);
@@ -84,13 +108,22 @@
 	let selectedSlide = $derived(slides.find((s) => s.id === selectedSlideId));
 
 	// Tool state
-	let activeTool = $state<'textbox' | 'image' | null>(null);
+	let activeTool = $state<'textbox' | 'image' | 'shape' | null>(null);
+
+	// Shape state
+	let showShapePicker = $state(false);
+	let selectedShapeType = $state<SlideShape['type'] | null>(null);
+	let selectedShapeId = $state<number | null>(null);
+	let editingShapeId = $state<number | null>(null);
+	let shapeToolbarAnchorRect = $state<{ top: number; left: number; width: number } | null>(null);
+	let shapeColorPickerTarget = $state<'fill' | 'border' | 'text' | null>(null);
 
 	// Drawing state
 	let isDrawing = $state(false);
 	let drawStart = $state<{ x: number; y: number } | null>(null);
 	let drawCurrent = $state<{ x: number; y: number } | null>(null);
 	let slideCanvasEl = $state<HTMLDivElement | null>(null);
+	let canvasWrapperEl = $state<HTMLDivElement | null>(null);
 
 	// Canvas zoom
 	let canvasZoom = $state(1);
@@ -106,46 +139,56 @@
 	let editingTextboxId = $state<number | null>(null);
 	let skipNextDeselect = false;
 
-	// Textbox dragging
-	let isDraggingTextbox = $state(false);
-	let dragTextboxId = $state<number | null>(null);
-	let dragOffset = $state<{ x: number; y: number } | null>(null);
-
-	function startDragTextbox(tbId: number, e: MouseEvent) {
-		if (!slideCanvasEl) return;
-		const tb = selectedSlide?.textboxes.find((t) => t.id === tbId);
-		if (!tb) return;
+	// Element dragging — uses pointer capture to bypass scroll containers
+	function startElementDragPointer(kind: 'textbox' | 'image' | 'shape', id: number, e: PointerEvent) {
+		if (!slideCanvasEl || !selectedSlide) return;
+		const item = kind === 'textbox'
+			? selectedSlide.textboxes.find((t) => t.id === id)
+			: kind === 'image'
+				? selectedSlide.images.find((i) => i.id === id)
+				: selectedSlide.shapes.find((s) => s.id === id);
+		if (!item) return;
 		e.preventDefault();
+		e.stopPropagation();
+		if (canvasWrapperEl) canvasWrapperEl.style.overflow = 'hidden';
+
+		const el = e.currentTarget as HTMLElement;
+		el.setPointerCapture(e.pointerId);
+
 		const rect = slideCanvasEl.getBoundingClientRect();
-		const mouseXPct = ((e.clientX - rect.left) / rect.width) * 100;
-		const mouseYPct = ((e.clientY - rect.top) / rect.height) * 100;
-		dragOffset = { x: mouseXPct - tb.x, y: mouseYPct - tb.y };
-		dragTextboxId = tbId;
-		isDraggingTextbox = true;
+		const mx = ((e.clientX - rect.left) / rect.width) * 100;
+		const my = ((e.clientY - rect.top) / rect.height) * 100;
+		const offX = mx - item.x;
+		const offY = my - item.y;
 		saveHistory();
-	}
 
-	function handleDragTextboxMove(e: MouseEvent) {
-		if (!isDraggingTextbox || dragTextboxId == null || !dragOffset || !slideCanvasEl || !selectedSlide) return;
-		const tb = selectedSlide.textboxes.find((t) => t.id === dragTextboxId);
-		if (!tb) return;
-		const rect = slideCanvasEl.getBoundingClientRect();
-		const mouseXPct = ((e.clientX - rect.left) / rect.width) * 100;
-		const mouseYPct = ((e.clientY - rect.top) / rect.height) * 100;
-		tb.x = Math.max(0, Math.min(100 - tb.width, mouseXPct - dragOffset.x));
-		tb.y = Math.max(0, Math.min(100 - tb.height, mouseYPct - dragOffset.y));
-		// Update toolbar position
-		const tbEl = slideCanvasEl.querySelector(`[data-textbox-id="${dragTextboxId}"]`) as HTMLElement | null;
-		if (tbEl) {
-			const tbRect = tbEl.getBoundingClientRect();
-			toolbarAnchorRect = { top: tbRect.top, left: tbRect.left, width: tbRect.width };
-		}
-	}
+		const onMove = (ev: PointerEvent) => {
+			if (!slideCanvasEl || !selectedSlide) return;
+			const it = kind === 'textbox'
+				? selectedSlide.textboxes.find((t) => t.id === id)
+				: kind === 'image'
+					? selectedSlide.images.find((i) => i.id === id)
+					: selectedSlide.shapes.find((s) => s.id === id);
+			if (!it) return;
+			const r = slideCanvasEl.getBoundingClientRect();
+			const cx = ((ev.clientX - r.left) / r.width) * 100;
+			const cy = ((ev.clientY - r.top) / r.height) * 100;
+			it.x = Math.max(0, Math.min(100 - it.width, cx - offX));
+			it.y = Math.max(0, Math.min(100 - it.height, cy - offY));
+			if (kind === 'textbox') refreshToolbarPosition();
+			else if (kind === 'image') refreshImageToolbarPosition();
+			else refreshShapeToolbarPosition();
+		};
 
-	function stopDragTextbox() {
-		isDraggingTextbox = false;
-		dragTextboxId = null;
-		dragOffset = null;
+		const onUp = (ev: PointerEvent) => {
+			el.releasePointerCapture(ev.pointerId);
+			el.removeEventListener('pointermove', onMove);
+			el.removeEventListener('pointerup', onUp);
+			if (canvasWrapperEl) canvasWrapperEl.style.overflow = '';
+		};
+
+		el.addEventListener('pointermove', onMove);
+		el.addEventListener('pointerup', onUp);
 	}
 
 	// Textbox resizing — uses pointer capture for reliable drag
@@ -155,6 +198,7 @@
 		if (!tb) return;
 		e.preventDefault();
 		e.stopPropagation();
+		if (canvasWrapperEl) canvasWrapperEl.style.overflow = 'hidden';
 
 		const el = e.currentTarget as HTMLElement;
 		el.setPointerCapture(e.pointerId);
@@ -201,11 +245,108 @@
 			el.releasePointerCapture(ev.pointerId);
 			el.removeEventListener('pointermove', onMove);
 			el.removeEventListener('pointerup', onUp);
+			if (canvasWrapperEl) canvasWrapperEl.style.overflow = '';
 		};
 
 		el.addEventListener('pointermove', onMove);
 		el.addEventListener('pointerup', onUp);
 	}
+
+	// Image resizing — uses pointer capture
+	function handleImageResizePointerDown(imgId: number, corner: 'tl' | 'tr' | 'bl' | 'br', e: PointerEvent) {
+		if (!slideCanvasEl) return;
+		const img = selectedSlide?.images.find((i) => i.id === imgId);
+		if (!img) return;
+		e.preventDefault();
+		e.stopPropagation();
+		if (canvasWrapperEl) canvasWrapperEl.style.overflow = 'hidden';
+
+		const el = e.currentTarget as HTMLElement;
+		el.setPointerCapture(e.pointerId);
+
+		const rect = slideCanvasEl.getBoundingClientRect();
+		const startX = ((e.clientX - rect.left) / rect.width) * 100;
+		const startY = ((e.clientY - rect.top) / rect.height) * 100;
+		const startImg = { x: img.x, y: img.y, w: img.width, h: img.height };
+		saveHistory();
+
+		const onMove = (ev: PointerEvent) => {
+			if (!slideCanvasEl || !selectedSlide) return;
+			const i = selectedSlide.images.find((i) => i.id === imgId);
+			if (!i) return;
+			const r = slideCanvasEl.getBoundingClientRect();
+			const dx = ((ev.clientX - r.left) / r.width) * 100 - startX;
+			const dy = ((ev.clientY - r.top) / r.height) * 100 - startY;
+			const MIN = 5;
+			if (corner === 'br') {
+				i.width = Math.max(MIN, startImg.w + dx);
+				i.height = Math.max(MIN, startImg.h + dy);
+			} else if (corner === 'bl') {
+				const nw = Math.max(MIN, startImg.w - dx);
+				i.x = startImg.x + startImg.w - nw;
+				i.width = nw;
+				i.height = Math.max(MIN, startImg.h + dy);
+			} else if (corner === 'tr') {
+				i.width = Math.max(MIN, startImg.w + dx);
+				const nh = Math.max(MIN, startImg.h - dy);
+				i.y = startImg.y + startImg.h - nh;
+				i.height = nh;
+			} else if (corner === 'tl') {
+				const nw = Math.max(MIN, startImg.w - dx);
+				const nh = Math.max(MIN, startImg.h - dy);
+				i.x = startImg.x + startImg.w - nw;
+				i.y = startImg.y + startImg.h - nh;
+				i.width = nw;
+				i.height = nh;
+			}
+			refreshImageToolbarPosition();
+		};
+
+		const onUp = (ev: PointerEvent) => {
+			el.releasePointerCapture(ev.pointerId);
+			el.removeEventListener('pointermove', onMove);
+			el.removeEventListener('pointerup', onUp);
+			if (canvasWrapperEl) canvasWrapperEl.style.overflow = '';
+		};
+
+		el.addEventListener('pointermove', onMove);
+		el.addEventListener('pointerup', onUp);
+	}
+
+	function refreshImageToolbarPosition() {
+		if (selectedImageId == null || !slideCanvasEl) return;
+		const imgEl = slideCanvasEl.querySelector(`[data-image-id="${selectedImageId}"]`) as HTMLElement | null;
+		if (imgEl) {
+			const rect = imgEl.getBoundingClientRect();
+			imageToolbarAnchorRect = { top: rect.top, left: rect.left, width: rect.width };
+		}
+	}
+
+	function captureImageToolbarAnchor(node: HTMLElement) {
+		const parent = node.closest('[data-image]') as HTMLElement;
+		if (parent) {
+			const rect = parent.getBoundingClientRect();
+			imageToolbarAnchorRect = { top: rect.top, left: rect.left, width: rect.width };
+		}
+		return {
+			destroy() {
+				imageToolbarAnchorRect = null;
+			}
+		};
+	}
+
+	$effect(() => {
+		if (selectedImageId == null) return;
+		const vv = window.visualViewport;
+		if (!vv) return;
+		const handler = () => refreshImageToolbarPosition();
+		vv.addEventListener('resize', handler);
+		vv.addEventListener('scroll', handler);
+		return () => {
+			vv.removeEventListener('resize', handler);
+			vv.removeEventListener('scroll', handler);
+		};
+	});
 
 	// Formatting toolbar state
 	let showFormattingToolbar = $state(false);
@@ -320,6 +461,9 @@
 		colorPickerTarget = null;
 		selectedImageId = null;
 		activeImageId = null;
+		selectedShapeId = null;
+		editingShapeId = null;
+		shapeColorPickerTarget = null;
 	}
 
 	function redo() {
@@ -338,6 +482,9 @@
 		colorPickerTarget = null;
 		selectedImageId = null;
 		activeImageId = null;
+		selectedShapeId = null;
+		editingShapeId = null;
+		shapeColorPickerTarget = null;
 	}
 
 	function addSlide() {
@@ -349,7 +496,8 @@
 			description: 'Click to edit this description',
 			isLanding: false,
 			images: [],
-			textboxes: []
+			textboxes: [],
+			shapes: []
 		});
 		selectedSlideId = id;
 	}
@@ -371,6 +519,8 @@
 		editingTextboxId = null;
 		selectedImageId = null;
 		activeImageId = null;
+		selectedShapeId = null;
+		editingShapeId = null;
 	}
 
 	function stopEditing() {
@@ -496,9 +646,10 @@
 	}
 
 	function handleCanvasMousedown(e: MouseEvent) {
-		if (activeTool !== 'textbox' && activeTool !== 'image') return;
+		if (activeTool !== 'textbox' && activeTool !== 'image' && activeTool !== 'shape') return;
 		if ((e.target as HTMLElement).closest('[data-textbox]')) return;
 		if ((e.target as HTMLElement).closest('[data-image]')) return;
+		if ((e.target as HTMLElement).closest('[data-shape]')) return;
 		const pos = getRelativePos(e);
 		if (!pos) return;
 		e.preventDefault();
@@ -519,9 +670,51 @@
 			return;
 		}
 
-		isDrawing = true;
-		drawStart = pos;
-		drawCurrent = pos;
+		if (activeTool === 'image' && selectedSlide) {
+			saveHistory();
+			const id = nextImageId++;
+			const size = 20;
+			const x = Math.max(0, Math.min(pos.x - size / 2, 100 - size));
+			const y = Math.max(0, Math.min(pos.y - size / 2, 100 - size));
+			selectedSlide.images.push({ id, src: '', name: '', x, y, width: size, height: size });
+			selectedImageId = id;
+			activeImageId = id;
+			selectedTextboxId = null;
+			editingTextboxId = null;
+			showFormattingToolbar = false;
+			activeTool = null;
+			skipNextDeselect = true;
+			return;
+		}
+
+		if (activeTool === 'shape' && selectedSlide && selectedShapeType) {
+			saveHistory();
+			const id = nextShapeId++;
+			const isLine = selectedShapeType === 'line' || selectedShapeType === 'arrow';
+			const w = isLine ? 25 : 20;
+			const h = isLine ? 2 : 15;
+			const x = Math.max(0, Math.min(pos.x - w / 2, 100 - w));
+			const y = Math.max(0, Math.min(pos.y - h / 2, 100 - h));
+			selectedSlide.shapes.push({
+				id, type: selectedShapeType, x, y, width: w, height: h,
+				text: '',
+				fillColor: 'transparent',
+				borderColor: '#6366f1',
+				borderWidth: 2,
+				textColor: '#ffffff',
+				fontSize: 14
+			});
+			selectedShapeId = id;
+			selectedTextboxId = null;
+			editingTextboxId = null;
+			showFormattingToolbar = false;
+			selectedImageId = null;
+			activeImageId = null;
+			activeTool = null;
+			selectedShapeType = null;
+			skipNextDeselect = true;
+			return;
+		}
 	}
 
 	function handleCanvasMousemove(e: MouseEvent) {
@@ -532,33 +725,6 @@
 	}
 
 	function handleCanvasMouseup() {
-		if (!isDrawing || !drawRect || !selectedSlide) {
-			isDrawing = false;
-			drawStart = null;
-			drawCurrent = null;
-			return;
-		}
-
-		const MIN_SIZE = 3;
-		if (drawRect.width >= MIN_SIZE && drawRect.height >= MIN_SIZE) {
-			if (activeTool === 'image') {
-				saveHistory();
-				const id = nextImageId++;
-				selectedSlide.images.push({
-					id,
-					src: '',
-					name: '',
-					x: drawRect.x,
-					y: drawRect.y,
-					width: drawRect.width,
-					height: drawRect.height
-				});
-				selectedImageId = id;
-				activeImageId = id;
-				activeTool = null;
-			}
-		}
-
 		isDrawing = false;
 		drawStart = null;
 		drawCurrent = null;
@@ -568,8 +734,6 @@
 		e.stopPropagation();
 		if (activeTool) return;
 		selectedTextboxId = id;
-		editingTextboxId = id;
-		showFormattingToolbar = true;
 		colorPickerTarget = null;
 		editingField = null;
 		selectedImageId = null;
@@ -580,9 +744,10 @@
 		e.stopPropagation();
 		if (activeTool) return;
 		selectedImageId = id;
-		activeImageId = null;
+		activeImageId = id;
 		selectedTextboxId = null;
 		editingTextboxId = null;
+		showFormattingToolbar = false;
 		editingField = null;
 	}
 
@@ -609,6 +774,167 @@
 		editingTextboxId = null;
 	}
 
+	// Shape functions
+	function toggleShapePicker() {
+		showShapePicker = !showShapePicker;
+		if (!showShapePicker && activeTool === 'shape') {
+			activeTool = null;
+			selectedShapeType = null;
+		}
+	}
+
+	function pickShapeType(type: SlideShape['type']) {
+		selectedShapeType = type;
+		activeTool = 'shape';
+		showShapePicker = false;
+		selectedTextboxId = null;
+		editingTextboxId = null;
+		selectedImageId = null;
+		activeImageId = null;
+		selectedShapeId = null;
+		editingShapeId = null;
+		editingField = null;
+	}
+
+	function selectShape(id: number, e: MouseEvent) {
+		e.stopPropagation();
+		if (activeTool) return;
+		selectedShapeId = id;
+		editingShapeId = null;
+		shapeColorPickerTarget = null;
+		selectedTextboxId = null;
+		editingTextboxId = null;
+		showFormattingToolbar = false;
+		selectedImageId = null;
+		activeImageId = null;
+		editingField = null;
+	}
+
+	function startEditingShape(id: number, e: MouseEvent) {
+		e.stopPropagation();
+		if (activeTool) return;
+		selectedShapeId = id;
+		editingShapeId = id;
+		shapeColorPickerTarget = null;
+		editingField = null;
+	}
+
+	function deleteShape(id: number) {
+		if (!selectedSlide) return;
+		saveHistory();
+		const idx = selectedSlide.shapes.findIndex((s) => s.id === id);
+		if (idx !== -1) selectedSlide.shapes.splice(idx, 1);
+		selectedShapeId = null;
+		editingShapeId = null;
+		shapeToolbarAnchorRect = null;
+		shapeColorPickerTarget = null;
+	}
+
+	function refreshShapeToolbarPosition() {
+		if (selectedShapeId == null || !slideCanvasEl) return;
+		const el = slideCanvasEl.querySelector(`[data-shape-id="${selectedShapeId}"]`) as HTMLElement | null;
+		if (el) {
+			const rect = el.getBoundingClientRect();
+			shapeToolbarAnchorRect = { top: rect.top, left: rect.left, width: rect.width };
+		}
+	}
+
+	function captureShapeToolbarAnchor(node: HTMLElement) {
+		const parent = node.closest('[data-shape]') as HTMLElement;
+		if (parent) {
+			const rect = parent.getBoundingClientRect();
+			shapeToolbarAnchorRect = { top: rect.top, left: rect.left, width: rect.width };
+		}
+		return {
+			destroy() {
+				shapeToolbarAnchorRect = null;
+			}
+		};
+	}
+
+	$effect(() => {
+		if (selectedShapeId == null) return;
+		const vv = window.visualViewport;
+		if (!vv) return;
+		const handler = () => refreshShapeToolbarPosition();
+		vv.addEventListener('resize', handler);
+		vv.addEventListener('scroll', handler);
+		return () => {
+			vv.removeEventListener('resize', handler);
+			vv.removeEventListener('scroll', handler);
+		};
+	});
+
+	function handleShapeResizePointerDown(shapeId: number, corner: 'tl' | 'tr' | 'bl' | 'br', e: PointerEvent) {
+		if (!slideCanvasEl) return;
+		const shape = selectedSlide?.shapes.find((s) => s.id === shapeId);
+		if (!shape) return;
+		e.preventDefault();
+		e.stopPropagation();
+
+		const el = e.currentTarget as HTMLElement;
+		el.setPointerCapture(e.pointerId);
+
+		const rect = slideCanvasEl.getBoundingClientRect();
+		const startX = ((e.clientX - rect.left) / rect.width) * 100;
+		const startY = ((e.clientY - rect.top) / rect.height) * 100;
+		const startShape = { x: shape.x, y: shape.y, w: shape.width, h: shape.height };
+		saveHistory();
+
+		const onMove = (ev: PointerEvent) => {
+			if (!slideCanvasEl || !selectedSlide) return;
+			const s = selectedSlide.shapes.find((s) => s.id === shapeId);
+			if (!s) return;
+			const r = slideCanvasEl.getBoundingClientRect();
+			const dx = ((ev.clientX - r.left) / r.width) * 100 - startX;
+			const dy = ((ev.clientY - r.top) / r.height) * 100 - startY;
+			const MIN = 3;
+			if (corner === 'br') {
+				s.width = Math.max(MIN, startShape.w + dx);
+				s.height = Math.max(MIN, startShape.h + dy);
+			} else if (corner === 'bl') {
+				const nw = Math.max(MIN, startShape.w - dx);
+				s.x = startShape.x + startShape.w - nw;
+				s.width = nw;
+				s.height = Math.max(MIN, startShape.h + dy);
+			} else if (corner === 'tr') {
+				s.width = Math.max(MIN, startShape.w + dx);
+				const nh = Math.max(MIN, startShape.h - dy);
+				s.y = startShape.y + startShape.h - nh;
+				s.height = nh;
+			} else if (corner === 'tl') {
+				const nw = Math.max(MIN, startShape.w - dx);
+				const nh = Math.max(MIN, startShape.h - dy);
+				s.x = startShape.x + startShape.w - nw;
+				s.y = startShape.y + startShape.h - nh;
+				s.width = nw;
+				s.height = nh;
+			}
+			refreshShapeToolbarPosition();
+		};
+
+		const onUp = (ev: PointerEvent) => {
+			el.releasePointerCapture(ev.pointerId);
+			el.removeEventListener('pointermove', onMove);
+			el.removeEventListener('pointerup', onUp);
+		};
+
+		el.addEventListener('pointermove', onMove);
+		el.addEventListener('pointerup', onUp);
+	}
+
+	function getSelectedShape(): SlideShape | undefined {
+		if (!selectedSlide || selectedShapeId == null) return undefined;
+		return selectedSlide.shapes.find((s) => s.id === selectedShapeId);
+	}
+
+	function updateShapeStyle<K extends keyof SlideShape>(key: K, value: SlideShape[K]) {
+		const shape = getSelectedShape();
+		if (!shape) return;
+		saveHistory();
+		shape[key] = value;
+	}
+
 	function deselectAll() {
 		if (activeTool) return;
 		if (skipNextDeselect) { skipNextDeselect = false; return; }
@@ -618,6 +944,11 @@
 		colorPickerTarget = null;
 		selectedImageId = null;
 		activeImageId = null;
+		imageToolbarAnchorRect = null;
+		selectedShapeId = null;
+		editingShapeId = null;
+		shapeToolbarAnchorRect = null;
+		shapeColorPickerTarget = null;
 	}
 
 	function close() {
@@ -629,21 +960,31 @@
 <svelte:window
 	onclick={(e) => {
 		const target = e.target as HTMLElement;
-		if (!target.closest('[data-editable]') && !target.closest('[data-textbox]') && !target.closest('[data-image]')) {
+		if (!target.closest('[data-editable]') && !target.closest('[data-textbox]') && !target.closest('[data-image]') && !target.closest('[data-shape]')) {
 			stopEditing();
 		}
 		if (colorPickerTarget && !target.closest('[data-toolbar]')) {
 			colorPickerTarget = null;
 		}
+		if (shapeColorPickerTarget && !target.closest('[data-shape-toolbar]')) {
+			shapeColorPickerTarget = null;
+		}
+		if (showShapePicker && !target.closest('[data-shape-picker]') && !target.closest('[data-shape-btn]')) {
+			showShapePicker = false;
+		}
 	}}
 	onkeydown={(e) => {
 		if (e.key === 'Escape') {
+			if (showShapePicker) { showShapePicker = false; return; }
+			if (shapeColorPickerTarget) { shapeColorPickerTarget = null; return; }
 			if (colorPickerTarget) { colorPickerTarget = null; return; }
+			if (editingShapeId) { editingShapeId = null; return; }
+			if (selectedShapeId) { selectedShapeId = null; shapeToolbarAnchorRect = null; return; }
 			if (activeImageId) { activeImageId = null; return; }
 			if (selectedImageId) { selectedImageId = null; return; }
 			if (editingTextboxId) { editingTextboxId = null; showFormattingToolbar = false; return; }
 			if (selectedTextboxId) { selectedTextboxId = null; return; }
-			if (activeTool) { activeTool = null; return; }
+			if (activeTool) { activeTool = null; selectedShapeType = null; return; }
 			if (editingField) { stopEditing(); return; }
 			close();
 		}
@@ -656,6 +997,11 @@
 			redo();
 		}
 		if (e.key === 'Delete' || e.key === 'Backspace') {
+			if (selectedShapeId && !editingShapeId) {
+				e.preventDefault();
+				deleteShape(selectedShapeId);
+				return;
+			}
 			if (selectedImageId && !activeImageId) {
 				e.preventDefault();
 				deleteImage(selectedImageId);
@@ -667,8 +1013,8 @@
 			}
 		}
 	}}
-	onmousemove={(e) => { handleCanvasMousemove(e); handleDragTextboxMove(e); }}
-	onmouseup={() => { handleCanvasMouseup(); stopDragTextbox(); }}
+	onmousemove={(e) => { handleCanvasMousemove(e); }}
+	onmouseup={() => { handleCanvasMouseup(); }}
 />
 
 <!-- Fullscreen overlay -->
@@ -753,29 +1099,55 @@
 		/>
 
 		<!-- Insert: Shape -->
-		<button
-			class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
-			aria-label="Insert shape"
-			title="Insert Shape"
-		>
-			<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-				<rect x="3" y="10" width="13" height="13" rx="2" />
-				<circle cx="15" cy="8" r="7" />
-			</svg>
-			<span class="hidden lg:inline">Shape</span>
-		</button>
+		<div class="relative" data-shape-btn>
+			<button
+				class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm transition-colors {showShapePicker || activeTool === 'shape'
+					? 'bg-indigo-500/20 text-indigo-400'
+					: 'text-slate-400 hover:text-white hover:bg-slate-700'}"
+				onclick={toggleShapePicker}
+				aria-label="Insert shape"
+				title="Insert Shape"
+			>
+				<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+					<rect x="3" y="10" width="13" height="13" rx="2" />
+					<circle cx="15" cy="8" r="7" />
+				</svg>
+				<span class="hidden lg:inline">Shape</span>
+			</button>
 
-		<!-- Insert: Line -->
-		<button
-			class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
-			aria-label="Insert line"
-			title="Insert Line"
-		>
-			<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24">
-				<path d="M5 19L19 5" />
-			</svg>
-			<span class="hidden lg:inline">Line</span>
-		</button>
+			{#if showShapePicker}
+				<div
+					class="absolute top-full left-0 mt-2 p-2 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl z-50 grid grid-cols-4 gap-1.5"
+					data-shape-picker
+					onclick={(e) => e.stopPropagation()}
+				>
+					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Line" onclick={() => pickShapeType('line')}>
+						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><line x1="4" y1="12" x2="20" y2="12"/></svg>
+					</button>
+					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Arrow" onclick={() => pickShapeType('arrow')}>
+						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><line x1="4" y1="12" x2="20" y2="12"/><polyline points="16,8 20,12 16,16"/></svg>
+					</button>
+					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Square" onclick={() => pickShapeType('square')}>
+						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><rect x="4" y="4" width="16" height="16"/></svg>
+					</button>
+					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Rounded Square" onclick={() => pickShapeType('rounded-square')}>
+						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="4"/></svg>
+					</button>
+					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Circle" onclick={() => pickShapeType('circle')}>
+						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><ellipse cx="12" cy="12" rx="8" ry="8"/></svg>
+					</button>
+					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Triangle" onclick={() => pickShapeType('triangle')}>
+						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><polygon points="12,4 22,20 2,20"/></svg>
+					</button>
+					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Diamond" onclick={() => pickShapeType('diamond')}>
+						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><polygon points="12,3 21,12 12,21 3,12"/></svg>
+					</button>
+					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Star" onclick={() => pickShapeType('star')}>
+						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"/></svg>
+					</button>
+				</div>
+			{/if}
+		</div>
 	</div>
 
 	<!-- Body: Sidebar + Slide Content -->
@@ -794,6 +1166,8 @@
 						editingTextboxId = null;
 						selectedImageId = null;
 						activeImageId = null;
+						selectedShapeId = null;
+						editingShapeId = null;
 					}}
 				>
 					<!-- Slide number badge -->
@@ -840,6 +1214,33 @@
 									{/if}
 								</div>
 							{/each}
+							{#each (slide.shapes ?? []) as sh}
+								<div
+									class="absolute overflow-hidden"
+									style="left:{sh.x}%;top:{sh.y}%;width:{sh.width}%;height:{sh.height}%"
+								>
+									<svg class="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+										{#if sh.type === 'circle'}
+											<ellipse cx="50" cy="50" rx="48" ry="48" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+										{:else if sh.type === 'triangle'}
+											<polygon points="50,2 98,98 2,98" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+										{:else if sh.type === 'diamond'}
+											<polygon points="50,2 98,50 50,98 2,50" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+										{:else if sh.type === 'star'}
+											<polygon points="50,5 61,35 95,35 68,57 79,90 50,70 21,90 32,57 5,35 39,35" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+										{:else if sh.type === 'rounded-square'}
+											<rect x="2" y="2" width="96" height="96" rx="12" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+										{:else if sh.type === 'line'}
+											<line x1="0" y1="50" x2="100" y2="50" stroke={sh.borderColor} stroke-width="4" />
+										{:else if sh.type === 'arrow'}
+											<line x1="0" y1="50" x2="90" y2="50" stroke={sh.borderColor} stroke-width="4" />
+											<polygon points="85,35 100,50 85,65" fill={sh.borderColor} />
+										{:else}
+											<rect x="2" y="2" width="96" height="96" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+										{/if}
+									</svg>
+								</div>
+							{/each}
 						</div>
 					</div>
 
@@ -877,17 +1278,18 @@
 
 	<!-- Right Panel: Slide Canvas -->
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="flex-1 flex items-center justify-center bg-slate-950 p-8 overflow-auto" onwheel={handleCanvasWheel}>
+	<div bind:this={canvasWrapperEl} class="flex-1 flex items-center justify-center bg-slate-950 p-8 overflow-auto" onwheel={handleCanvasWheel}>
 		{#if selectedSlide}
 			<div
 				bind:this={slideCanvasEl}
 				class="relative w-full bg-slate-900 rounded-xl border border-slate-800 overflow-hidden select-none origin-center transition-transform duration-100"
 				style="max-width:1100px;aspect-ratio:16/10;transform:scale({canvasZoom})"
-				class:cursor-crosshair={activeTool === 'textbox' || activeTool === 'image'}
+				class:cursor-crosshair={activeTool === 'textbox' || activeTool === 'image' || activeTool === 'shape'}
 				role="presentation"
 				onmousedown={handleCanvasMousedown}
 				onclick={(e) => {
-					if (!(e.target as HTMLElement).closest('[data-textbox]') && !(e.target as HTMLElement).closest('[data-editable]') && !(e.target as HTMLElement).closest('[data-image]')) {
+					const t = e.target as HTMLElement;
+					if (!t.closest('[data-textbox]') && !t.closest('[data-editable]') && !t.closest('[data-image]') && !t.closest('[data-shape]')) {
 						deselectAll();
 					}
 				}}
@@ -1008,18 +1410,21 @@
 					<div
 						data-textbox
 						data-textbox-id={tb.id}
-						class="absolute border-2 rounded transition-colors {selectedTextboxId === tb.id
+						class="absolute border-2 rounded transition-colors touch-none {selectedTextboxId === tb.id
 							? 'border-indigo-500 shadow-lg shadow-indigo-500/10'
 							: 'border-slate-600 hover:border-slate-500'}"
-						style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;height:{tb.height}%;background:{tb.bgColor ?? 'transparent'}"
+						style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%;background:{tb.bgColor ?? 'transparent'}"
 						role="button"
 						tabindex="0"
-						onclick={(e) => selectTextbox(tb.id, e)}
-						ondblclick={(e) => startEditingTextbox(tb.id, e)}
-						onmousedown={(e) => {
+						onpointerdown={(e) => {
 							if ((e.target as HTMLElement).tagName === 'TEXTAREA') return;
-							startDragTextbox(tb.id, e);
+							if (activeTool) return;
+							if (editingTextboxId === tb.id) return;
+							e.preventDefault();
+							selectTextbox(tb.id, e);
+							startElementDragPointer('textbox', tb.id, e);
 						}}
+						ondblclick={(e) => startEditingTextbox(tb.id, e)}
 						onkeydown={(e) => e.key === 'Enter' && startEditingTextbox(tb.id, new MouseEvent('click'))}
 					>
 						<!-- Toolbar position anchor -->
@@ -1028,19 +1433,20 @@
 						{/if}
 
 						{#if editingTextboxId === tb.id}
-							<!-- Drag handle -->
-							<div
-								class="absolute -top-5 left-1/2 -translate-x-1/2 z-10 px-3 py-0.5 rounded-t-md bg-indigo-500/80 cursor-move flex items-center gap-1"
-								onmousedown={(e) => { e.stopPropagation(); startDragTextbox(tb.id, e); }}
-							>
-								<svg class="w-3 h-3 text-white/70" fill="currentColor" viewBox="0 0 24 24"><circle cx="5" cy="5" r="2"/><circle cx="12" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
-							</div>
 							<textarea
 								bind:value={tb.text}
-								class="w-full h-full bg-transparent p-2 resize-none focus:outline-none relative z-0"
+								class="w-full h-full bg-transparent p-2 resize-none focus:outline-none relative z-0 break-words"
 								style={buildTextStyle(tb)}
 								placeholder="Type here..."
 								onclick={(e) => e.stopPropagation()}
+								oninput={(e) => {
+									const ta = e.currentTarget;
+									if (ta.scrollHeight > ta.clientHeight && slideCanvasEl) {
+										const canvasH = slideCanvasEl.getBoundingClientRect().height;
+										const extra = ta.scrollHeight - ta.clientHeight;
+										tb.height += (extra / canvasH) * 100;
+									}
+								}}
 								onkeydown={(e) => {
 									if (e.key === 'Escape') {
 										if (colorPickerTarget) { colorPickerTarget = null; }
@@ -1051,7 +1457,7 @@
 								autofocus
 							></textarea>
 						{:else}
-							<div class="w-full h-full p-2 whitespace-pre-wrap overflow-hidden" style={buildTextStyle(tb)}>
+							<div class="w-full p-2 whitespace-pre-wrap break-words" style={buildTextStyle(tb)}>
 								{#if tb.text}
 									{tb.text}
 								{:else}
@@ -1077,11 +1483,13 @@
 
 						{#if selectedTextboxId === tb.id && editingTextboxId !== tb.id}
 							<button
-								class="absolute -top-3 -right-3 w-6 h-6 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center transition-colors"
+								data-no-drag
+								class="absolute -top-3 -right-3 w-6 h-6 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center transition-colors z-30"
 								onclick={(e) => {
 									e.stopPropagation();
 									deleteTextbox(tb.id);
 								}}
+								onpointerdown={(e) => e.stopPropagation()}
 								aria-label="Delete textbox"
 							>
 								<svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
@@ -1096,7 +1504,8 @@
 				{#each selectedSlide.images as image (image.id)}
 					<div
 						data-image
-						class="absolute rounded transition-colors overflow-hidden {selectedImageId === image.id
+						data-image-id={image.id}
+						class="absolute rounded transition-colors touch-none {selectedImageId === image.id
 							? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10'
 							: image.src === ''
 								? 'border-2 border-dashed border-slate-600 hover:border-slate-500'
@@ -1104,10 +1513,19 @@
 						style="left:{image.x}%;top:{image.y}%;width:{image.width}%;height:{image.height}%"
 						role="button"
 						tabindex="0"
-						onclick={(e) => selectImage(image.id, e)}
-						ondblclick={(e) => { e.stopPropagation(); selectedImageId = image.id; activeImageId = image.id; }}
-						onkeydown={(e) => e.key === 'Enter' && (() => { selectedImageId = image.id; activeImageId = image.id; })()}
+						onpointerdown={(e) => {
+							if (activeTool) return;
+							e.preventDefault();
+							selectImage(image.id, e);
+							startElementDragPointer('image', image.id, e);
+						}}
+						onkeydown={(e) => e.key === 'Enter' && selectImage(image.id, new MouseEvent('click'))}
 					>
+						<!-- Toolbar position anchor -->
+						{#if selectedImageId === image.id}
+							<div class="hidden" use:captureImageToolbarAnchor></div>
+						{/if}
+
 						{#if image.src === ''}
 							<!-- Empty placeholder -->
 							<div class="w-full h-full flex items-center justify-center bg-slate-800/50">
@@ -1120,14 +1538,29 @@
 							<img src={image.src} alt={image.name} class="w-full h-full object-cover" />
 						{/if}
 
-						<!-- Delete button when selected -->
 						{#if selectedImageId === image.id}
+							<!-- Resize corner handles -->
+							{#each [
+								{ pos: 'top-0 left-0 -translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'tl' as const },
+								{ pos: 'top-0 right-0 translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'tr' as const },
+								{ pos: 'bottom-0 left-0 -translate-x-1/2 translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'bl' as const },
+								{ pos: 'bottom-0 right-0 translate-x-1/2 translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'br' as const },
+							] as handle}
+								<div
+									class="absolute {handle.pos} w-4 h-4 rounded-full bg-white border-2 border-indigo-500 {handle.cursor} z-30 touch-none"
+									onpointerdown={(e) => handleImageResizePointerDown(image.id, handle.corner, e)}
+								></div>
+							{/each}
+
+							<!-- Delete button -->
 							<button
-								class="absolute -top-3 -right-3 w-6 h-6 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center transition-colors z-10"
+								data-no-drag
+								class="absolute -top-3 -right-3 w-6 h-6 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center transition-colors z-30"
 								onclick={(e) => {
 									e.stopPropagation();
 									deleteImage(image.id);
 								}}
+								onpointerdown={(e) => e.stopPropagation()}
 								aria-label="Delete image"
 							>
 								<svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
@@ -1135,42 +1568,114 @@
 								</svg>
 							</button>
 						{/if}
-
-						<!-- Source selection menu when active -->
-						{#if activeImageId === image.id}
-							<div class="absolute inset-0 flex items-center justify-center bg-black/40 z-10" data-image>
-								<div class="flex gap-2" onclick={(e) => e.stopPropagation()}>
-									<button
-										class="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm text-white border border-slate-600 transition-colors"
-										onclick={openFilePicker}
-									>
-										<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-											<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" />
-										</svg>
-										Upload
-									</button>
-									<button
-										class="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm text-white border border-slate-600 transition-colors"
-										onclick={openCamera}
-									>
-										<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-											<path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" /><circle cx="12" cy="13" r="4" />
-										</svg>
-										Camera
-									</button>
-								</div>
-							</div>
-						{/if}
 					</div>
 				{/each}
 
-				<!-- Drawing preview rectangle -->
-				{#if isDrawing && drawRect}
+				<!-- Shapes layer -->
+				{#each selectedSlide.shapes as shape (shape.id)}
 					<div
-						class="absolute border-2 border-dashed border-indigo-400 bg-indigo-500/10 rounded pointer-events-none"
-						style="left:{drawRect.x}%;top:{drawRect.y}%;width:{drawRect.width}%;height:{drawRect.height}%"
-					></div>
-				{/if}
+						data-shape
+						data-shape-id={shape.id}
+						class="absolute transition-colors {selectedShapeId === shape.id
+							? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10'
+							: 'hover:ring-1 hover:ring-slate-500'}"
+						style="left:{shape.x}%;top:{shape.y}%;width:{shape.width}%;height:{shape.height}%"
+						role="button"
+						tabindex="0"
+						onpointerdown={(e) => {
+							if ((e.target as HTMLElement).tagName === 'TEXTAREA') return;
+							if (activeTool) return;
+							if (editingShapeId === shape.id) return;
+							selectShape(shape.id, e);
+							startElementDragPointer('shape', shape.id, e);
+						}}
+						ondblclick={(e) => startEditingShape(shape.id, e)}
+						onkeydown={(e) => e.key === 'Enter' && startEditingShape(shape.id, new MouseEvent('click'))}
+					>
+						<!-- Toolbar position anchor -->
+						{#if selectedShapeId === shape.id}
+							<div class="hidden" use:captureShapeToolbarAnchor></div>
+						{/if}
+
+						<!-- SVG shape -->
+						<svg class="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
+							{#if shape.type === 'line'}
+								<line x1="0" y1="50" x2="100" y2="50" stroke={shape.borderColor} stroke-width={shape.borderWidth * 2} fill="none" />
+							{:else if shape.type === 'arrow'}
+								<line x1="0" y1="50" x2="90" y2="50" stroke={shape.borderColor} stroke-width={shape.borderWidth * 2} fill="none" />
+								<polygon points="85,35 100,50 85,65" fill={shape.borderColor} />
+							{:else if shape.type === 'square'}
+								<rect x="1" y="1" width="98" height="98" fill={shape.fillColor} stroke={shape.borderColor} stroke-width={shape.borderWidth * 2} vector-effect="non-scaling-stroke" />
+							{:else if shape.type === 'rounded-square'}
+								<rect x="1" y="1" width="98" height="98" rx="12" fill={shape.fillColor} stroke={shape.borderColor} stroke-width={shape.borderWidth * 2} vector-effect="non-scaling-stroke" />
+							{:else if shape.type === 'circle'}
+								<ellipse cx="50" cy="50" rx="49" ry="49" fill={shape.fillColor} stroke={shape.borderColor} stroke-width={shape.borderWidth * 2} vector-effect="non-scaling-stroke" />
+							{:else if shape.type === 'triangle'}
+								<polygon points="50,2 98,98 2,98" fill={shape.fillColor} stroke={shape.borderColor} stroke-width={shape.borderWidth * 2} vector-effect="non-scaling-stroke" />
+							{:else if shape.type === 'diamond'}
+								<polygon points="50,2 98,50 50,98 2,50" fill={shape.fillColor} stroke={shape.borderColor} stroke-width={shape.borderWidth * 2} vector-effect="non-scaling-stroke" />
+							{:else if shape.type === 'star'}
+								<polygon points="50,5 61,35 95,35 68,57 79,90 50,70 21,90 32,57 5,35 39,35" fill={shape.fillColor} stroke={shape.borderColor} stroke-width={shape.borderWidth * 2} vector-effect="non-scaling-stroke" />
+							{/if}
+						</svg>
+
+						<!-- Text overlay -->
+						{#if editingShapeId === shape.id}
+							<textarea
+								bind:value={shape.text}
+								class="absolute inset-0 w-full h-full bg-transparent p-2 resize-none focus:outline-none text-center flex items-center justify-center z-10"
+								style="font-size:{shape.fontSize}px;color:{shape.textColor};line-height:1.3"
+								placeholder="Type..."
+								onclick={(e) => e.stopPropagation()}
+								onkeydown={(e) => {
+									if (e.key === 'Escape') {
+										if (shapeColorPickerTarget) { shapeColorPickerTarget = null; }
+										else { editingShapeId = null; }
+									}
+									e.stopPropagation();
+								}}
+								autofocus
+							></textarea>
+						{:else if shape.text}
+							<div class="absolute inset-0 flex items-center justify-center text-center p-2 pointer-events-none z-10" style="font-size:{shape.fontSize}px;color:{shape.textColor};line-height:1.3">
+								{shape.text}
+							</div>
+						{/if}
+
+						{#if selectedShapeId === shape.id}
+							<!-- Resize corner handles -->
+							{#each [
+								{ pos: 'top-0 left-0 -translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'tl' as const },
+								{ pos: 'top-0 right-0 translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'tr' as const },
+								{ pos: 'bottom-0 left-0 -translate-x-1/2 translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'bl' as const },
+								{ pos: 'bottom-0 right-0 translate-x-1/2 translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'br' as const },
+							] as handle}
+								<div
+									class="absolute {handle.pos} w-4 h-4 rounded-full bg-white border-2 border-indigo-500 {handle.cursor} z-30 touch-none"
+									onpointerdown={(e) => handleShapeResizePointerDown(shape.id, handle.corner, e)}
+								></div>
+							{/each}
+
+							<!-- Delete button -->
+							{#if editingShapeId !== shape.id}
+								<button
+									data-no-drag
+									class="absolute -top-3 -right-3 w-6 h-6 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center transition-colors z-30"
+									onclick={(e) => {
+										e.stopPropagation();
+										deleteShape(shape.id);
+									}}
+									onpointerdown={(e) => e.stopPropagation()}
+									aria-label="Delete shape"
+								>
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+										<path d="M18 6L6 18M6 6l12 12" />
+									</svg>
+								</button>
+							{/if}
+						{/if}
+					</div>
+				{/each}
 			</div>
 		{/if}
 	</div>
@@ -1267,12 +1772,14 @@
 					style="color:{tb.textColor ?? '#ffffff'}"
 					onclick={() => { colorPickerTarget = colorPickerTarget === 'text' ? null : 'text'; }}
 					title="Text color"
-				>A</button>
+				>A
+					<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{tb.textColor ?? '#ffffff'}"></span>
+				</button>
 				{#if colorPickerTarget === 'text'}
-					<div class="absolute top-full left-1/2 -translate-x-1/2 mt-2 p-2.5 bg-slate-800 border border-slate-600 rounded-xl shadow-xl z-50 grid grid-cols-6 gap-1.5" data-toolbar>
+					<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 grid grid-cols-6 gap-2" data-toolbar>
 						{#each presetColors as c}
 							<button
-								class="w-6 h-6 rounded-lg border transition-transform hover:scale-110 {c === (tb.textColor ?? '#ffffff') ? 'border-indigo-400 ring-1 ring-indigo-400' : 'border-slate-500'}"
+								class="w-7 h-7 rounded-lg border-2 transition-transform hover:scale-110 {c === (tb.textColor ?? '#ffffff') ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-500'}"
 								style="background:{c}"
 								onclick={() => { updateTextboxStyle('textColor', c); colorPickerTarget = null; }}
 							></button>
@@ -1284,7 +1791,7 @@
 			<!-- Highlight color -->
 			<div class="relative">
 				<button
-					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600"
+					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600 text-slate-400"
 					title="Highlight color"
 					onclick={() => { colorPickerTarget = colorPickerTarget === 'highlight' ? null : 'highlight'; }}
 				>
@@ -1294,16 +1801,16 @@
 					<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{(tb.highlight && tb.highlight !== 'transparent') ? tb.highlight : '#64748b'}"></span>
 				</button>
 				{#if colorPickerTarget === 'highlight'}
-					<div class="absolute top-full left-1/2 -translate-x-1/2 mt-2 p-2.5 bg-slate-800 border border-slate-600 rounded-xl shadow-xl z-50 grid grid-cols-6 gap-1.5" data-toolbar>
+					<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 grid grid-cols-6 gap-2" data-toolbar>
 						<button
-							class="w-6 h-6 rounded-lg border border-slate-500 transition-transform hover:scale-110"
-							style="background:repeating-conic-gradient(#334155 0% 25%, transparent 0% 50%) 50% / 8px 8px"
+							class="w-7 h-7 rounded-lg border-2 border-slate-500 transition-transform hover:scale-110 flex items-center justify-center text-slate-400 text-xs"
+							style="background:repeating-conic-gradient(#475569 0% 25%, #334155 0% 50%) 50% / 8px 8px"
 							onclick={() => { updateTextboxStyle('highlight', 'transparent'); colorPickerTarget = null; }}
 							title="None"
 						></button>
 						{#each presetColors as c}
 							<button
-								class="w-6 h-6 rounded-lg border transition-transform hover:scale-110 {c === (tb.highlight ?? 'transparent') ? 'border-indigo-400 ring-1 ring-indigo-400' : 'border-slate-500'}"
+								class="w-7 h-7 rounded-lg border-2 transition-transform hover:scale-110 {c === (tb.highlight ?? 'transparent') ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-500'}"
 								style="background:{c}"
 								onclick={() => { updateTextboxStyle('highlight', c); colorPickerTarget = null; }}
 							></button>
@@ -1315,7 +1822,7 @@
 			<!-- Background color -->
 			<div class="relative">
 				<button
-					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600"
+					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600 text-slate-400"
 					title="Background color"
 					onclick={() => { colorPickerTarget = colorPickerTarget === 'bg' ? null : 'bg'; }}
 				>
@@ -1325,22 +1832,177 @@
 					<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{(tb.bgColor && tb.bgColor !== 'transparent') ? tb.bgColor : '#64748b'}"></span>
 				</button>
 				{#if colorPickerTarget === 'bg'}
-					<div class="absolute top-full right-0 mt-2 p-2.5 bg-slate-800 border border-slate-600 rounded-xl shadow-xl z-50 grid grid-cols-6 gap-1.5" data-toolbar>
+					<div class="absolute bottom-full right-0 mb-2 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 grid grid-cols-6 gap-2" data-toolbar>
 						<button
-							class="w-6 h-6 rounded-lg border border-slate-500 transition-transform hover:scale-110"
-							style="background:repeating-conic-gradient(#334155 0% 25%, transparent 0% 50%) 50% / 8px 8px"
+							class="w-7 h-7 rounded-lg border-2 border-slate-500 transition-transform hover:scale-110"
+							style="background:repeating-conic-gradient(#475569 0% 25%, #334155 0% 50%) 50% / 8px 8px"
 							onclick={() => { updateTextboxStyle('bgColor', 'transparent'); colorPickerTarget = null; }}
 							title="None"
 						></button>
 						{#each presetColors as c}
 							<button
-								class="w-6 h-6 rounded-lg border transition-transform hover:scale-110 {c === (tb.bgColor ?? 'transparent') ? 'border-indigo-400 ring-1 ring-indigo-400' : 'border-slate-500'}"
+								class="w-7 h-7 rounded-lg border-2 transition-transform hover:scale-110 {c === (tb.bgColor ?? 'transparent') ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-500'}"
 								style="background:{c}"
 								onclick={() => { updateTextboxStyle('bgColor', c); colorPickerTarget = null; }}
 							></button>
 						{/each}
 					</div>
 				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Floating Image Toolbar -->
+	{#if selectedImageId != null && activeImageId != null && imageToolbarAnchorRect}
+		<div
+			class="fixed z-[150] flex items-center gap-2 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 shadow-xl whitespace-nowrap"
+			data-image
+			style="top:{imageToolbarAnchorRect.top - 60}px;left:{imageToolbarAnchorRect.left + imageToolbarAnchorRect.width / 2}px;transform:translateX(-50%)"
+			onclick={(e) => e.stopPropagation()}
+			onmousedown={(e) => e.preventDefault()}
+		>
+			<button
+				class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm text-white transition-colors"
+				onclick={openFilePicker}
+			>
+				<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+					<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" />
+				</svg>
+				Upload
+			</button>
+			<button
+				class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm text-white transition-colors"
+				onclick={openCamera}
+			>
+				<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+					<path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" /><circle cx="12" cy="13" r="4" />
+				</svg>
+				Camera
+			</button>
+		</div>
+	{/if}
+
+	<!-- Floating Shape Toolbar -->
+	{#if selectedShapeId != null && shapeToolbarAnchorRect && getSelectedShape()}
+		{@const shape = getSelectedShape()!}
+		<div
+			class="fixed z-[150] flex items-center gap-1.5 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 shadow-xl whitespace-nowrap"
+			data-shape-toolbar
+			style="top:{shapeToolbarAnchorRect.top - 60}px;left:{shapeToolbarAnchorRect.left + shapeToolbarAnchorRect.width / 2}px;transform:translateX(-50%)"
+			onclick={(e) => e.stopPropagation()}
+			onmousedown={(e) => e.preventDefault()}
+		>
+			<!-- Fill color -->
+			<div class="relative">
+				<button
+					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600"
+					title="Fill color"
+					onclick={() => { shapeColorPickerTarget = shapeColorPickerTarget === 'fill' ? null : 'fill'; }}
+				>
+					<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+					<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{shape.fillColor !== 'transparent' ? shape.fillColor : '#64748b'}"></span>
+				</button>
+				{#if shapeColorPickerTarget === 'fill'}
+					<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 grid grid-cols-6 gap-2" data-shape-toolbar>
+						<button
+							class="w-7 h-7 rounded-lg border-2 border-slate-500 transition-transform hover:scale-110"
+							style="background:repeating-conic-gradient(#475569 0% 25%, #334155 0% 50%) 50% / 8px 8px"
+							onclick={() => { updateShapeStyle('fillColor', 'transparent'); shapeColorPickerTarget = null; }}
+							title="None"
+						></button>
+						{#each presetColors as c}
+							<button
+								class="w-7 h-7 rounded-lg border-2 transition-transform hover:scale-110 {c === shape.fillColor ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-500'}"
+								style="background:{c}"
+								onclick={() => { updateShapeStyle('fillColor', c); shapeColorPickerTarget = null; }}
+							></button>
+						{/each}
+					</div>
+				{/if}
+			</div>
+
+			<!-- Border color -->
+			<div class="relative">
+				<button
+					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600"
+					title="Border color"
+					onclick={() => { shapeColorPickerTarget = shapeColorPickerTarget === 'border' ? null : 'border'; }}
+				>
+					<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="4 2"/></svg>
+					<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{shape.borderColor}"></span>
+				</button>
+				{#if shapeColorPickerTarget === 'border'}
+					<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 grid grid-cols-6 gap-2" data-shape-toolbar>
+						{#each presetColors as c}
+							<button
+								class="w-7 h-7 rounded-lg border-2 transition-transform hover:scale-110 {c === shape.borderColor ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-500'}"
+								style="background:{c}"
+								onclick={() => { updateShapeStyle('borderColor', c); shapeColorPickerTarget = null; }}
+							></button>
+						{/each}
+					</div>
+				{/if}
+			</div>
+
+			<div class="w-px h-7 bg-slate-600 mx-1"></div>
+
+			<!-- Border width -->
+			<div class="flex items-center gap-0.5">
+				<button
+					class="px-2 py-1 rounded text-xs transition-colors {shape.borderWidth === 1 ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
+					onclick={() => updateShapeStyle('borderWidth', 1)}
+					title="Thin border"
+				>Thin</button>
+				<button
+					class="px-2 py-1 rounded text-xs transition-colors {shape.borderWidth === 2 ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
+					onclick={() => updateShapeStyle('borderWidth', 2)}
+					title="Medium border"
+				>Med</button>
+				<button
+					class="px-2 py-1 rounded text-xs transition-colors {shape.borderWidth === 4 ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
+					onclick={() => updateShapeStyle('borderWidth', 4)}
+					title="Thick border"
+				>Thick</button>
+			</div>
+
+			<div class="w-px h-7 bg-slate-600 mx-1"></div>
+
+			<!-- Text color -->
+			<div class="relative">
+				<button
+					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors text-sm font-bold hover:bg-slate-600"
+					style="color:{shape.textColor}"
+					title="Text color"
+					onclick={() => { shapeColorPickerTarget = shapeColorPickerTarget === 'text' ? null : 'text'; }}
+				>A
+					<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{shape.textColor}"></span>
+				</button>
+				{#if shapeColorPickerTarget === 'text'}
+					<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 grid grid-cols-6 gap-2" data-shape-toolbar>
+						{#each presetColors as c}
+							<button
+								class="w-7 h-7 rounded-lg border-2 transition-transform hover:scale-110 {c === shape.textColor ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-500'}"
+								style="background:{c}"
+								onclick={() => { updateShapeStyle('textColor', c); shapeColorPickerTarget = null; }}
+							></button>
+						{/each}
+					</div>
+				{/if}
+			</div>
+
+			<!-- Font size -->
+			<div class="flex items-center gap-1 ml-1">
+				<button
+					class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-600 text-sm"
+					onclick={() => updateShapeStyle('fontSize', Math.max(8, shape.fontSize - 2))}
+					title="Decrease font size"
+				>&minus;</button>
+				<span class="text-sm text-slate-300 w-7 text-center">{shape.fontSize}</span>
+				<button
+					class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-600 text-sm"
+					onclick={() => updateShapeStyle('fontSize', Math.min(72, shape.fontSize + 2))}
+					title="Increase font size"
+				>+</button>
 			</div>
 		</div>
 	{/if}
