@@ -60,12 +60,12 @@
 			<a
 				href={item.href}
 				onclick={handleNavClick}
-				class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors {isActive(item.href)
+				class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-base font-medium transition-colors {isActive(item.href)
 					? 'bg-indigo-500/10 text-indigo-400'
 					: 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}"
 			>
 				<svg
-					class="w-5 h-5 shrink-0"
+					class="w-6 h-6 shrink-0"
 					fill="none"
 					stroke="currentColor"
 					stroke-width="2"

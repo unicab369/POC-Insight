@@ -12,7 +12,8 @@
       "Bash(npm uninstall:*)",
       "Bash(npm run build:*)",
       "Bash(npx svelte-check:*)",
-      "mcp__ide__getDiagnostics"
+      "mcp__ide__getDiagnostics",
+      "Bash(xxd:*)"
     ]
   }
 }

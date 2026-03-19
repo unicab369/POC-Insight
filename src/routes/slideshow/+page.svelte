@@ -148,68 +148,63 @@
 		dragOffset = null;
 	}
 
-	// Textbox resizing
-	let isResizingTextbox = $state(false);
-	let resizeTextboxId = $state<number | null>(null);
-	let resizeCorner = $state<'tl' | 'tr' | 'bl' | 'br' | null>(null);
-	let resizeStart = $state<{ x: number; y: number; tbX: number; tbY: number; tbW: number; tbH: number } | null>(null);
-
-	function startResizeTextbox(tbId: number, corner: 'tl' | 'tr' | 'bl' | 'br', e: MouseEvent) {
+	// Textbox resizing — uses pointer capture for reliable drag
+	function handleResizePointerDown(tbId: number, corner: 'tl' | 'tr' | 'bl' | 'br', e: PointerEvent) {
 		if (!slideCanvasEl) return;
 		const tb = selectedSlide?.textboxes.find((t) => t.id === tbId);
 		if (!tb) return;
 		e.preventDefault();
 		e.stopPropagation();
+
+		const el = e.currentTarget as HTMLElement;
+		el.setPointerCapture(e.pointerId);
+
 		const rect = slideCanvasEl.getBoundingClientRect();
-		const mouseXPct = ((e.clientX - rect.left) / rect.width) * 100;
-		const mouseYPct = ((e.clientY - rect.top) / rect.height) * 100;
-		resizeStart = { x: mouseXPct, y: mouseYPct, tbX: tb.x, tbY: tb.y, tbW: tb.width, tbH: tb.height };
-		resizeTextboxId = tbId;
-		resizeCorner = corner;
-		isResizingTextbox = true;
+		const startX = ((e.clientX - rect.left) / rect.width) * 100;
+		const startY = ((e.clientY - rect.top) / rect.height) * 100;
+		const startTb = { x: tb.x, y: tb.y, w: tb.width, h: tb.height };
 		saveHistory();
-	}
 
-	function handleResizeTextboxMove(e: MouseEvent) {
-		if (!isResizingTextbox || resizeTextboxId == null || !resizeCorner || !resizeStart || !slideCanvasEl || !selectedSlide) return;
-		const tb = selectedSlide.textboxes.find((t) => t.id === resizeTextboxId);
-		if (!tb) return;
-		const rect = slideCanvasEl.getBoundingClientRect();
-		const mouseXPct = ((e.clientX - rect.left) / rect.width) * 100;
-		const mouseYPct = ((e.clientY - rect.top) / rect.height) * 100;
-		const dx = mouseXPct - resizeStart.x;
-		const dy = mouseYPct - resizeStart.y;
-		const MIN = 5;
+		const onMove = (ev: PointerEvent) => {
+			if (!slideCanvasEl || !selectedSlide) return;
+			const t = selectedSlide.textboxes.find((t) => t.id === tbId);
+			if (!t) return;
+			const r = slideCanvasEl.getBoundingClientRect();
+			const dx = ((ev.clientX - r.left) / r.width) * 100 - startX;
+			const dy = ((ev.clientY - r.top) / r.height) * 100 - startY;
+			const MIN = 5;
+			if (corner === 'br') {
+				t.width = Math.max(MIN, startTb.w + dx);
+				t.height = Math.max(MIN, startTb.h + dy);
+			} else if (corner === 'bl') {
+				const nw = Math.max(MIN, startTb.w - dx);
+				t.x = startTb.x + startTb.w - nw;
+				t.width = nw;
+				t.height = Math.max(MIN, startTb.h + dy);
+			} else if (corner === 'tr') {
+				t.width = Math.max(MIN, startTb.w + dx);
+				const nh = Math.max(MIN, startTb.h - dy);
+				t.y = startTb.y + startTb.h - nh;
+				t.height = nh;
+			} else if (corner === 'tl') {
+				const nw = Math.max(MIN, startTb.w - dx);
+				const nh = Math.max(MIN, startTb.h - dy);
+				t.x = startTb.x + startTb.w - nw;
+				t.y = startTb.y + startTb.h - nh;
+				t.width = nw;
+				t.height = nh;
+			}
+			refreshToolbarPosition();
+		};
 
-		if (resizeCorner === 'br') {
-			tb.width = Math.max(MIN, resizeStart.tbW + dx);
-			tb.height = Math.max(MIN, resizeStart.tbH + dy);
-		} else if (resizeCorner === 'bl') {
-			const newW = Math.max(MIN, resizeStart.tbW - dx);
-			tb.x = resizeStart.tbX + resizeStart.tbW - newW;
-			tb.width = newW;
-			tb.height = Math.max(MIN, resizeStart.tbH + dy);
-		} else if (resizeCorner === 'tr') {
-			tb.width = Math.max(MIN, resizeStart.tbW + dx);
-			const newH = Math.max(MIN, resizeStart.tbH - dy);
-			tb.y = resizeStart.tbY + resizeStart.tbH - newH;
-			tb.height = newH;
-		} else if (resizeCorner === 'tl') {
-			const newW = Math.max(MIN, resizeStart.tbW - dx);
-			const newH = Math.max(MIN, resizeStart.tbH - dy);
-			tb.x = resizeStart.tbX + resizeStart.tbW - newW;
-			tb.y = resizeStart.tbY + resizeStart.tbH - newH;
-			tb.width = newW;
-			tb.height = newH;
-		}
-		refreshToolbarPosition();
-	}
+		const onUp = (ev: PointerEvent) => {
+			el.releasePointerCapture(ev.pointerId);
+			el.removeEventListener('pointermove', onMove);
+			el.removeEventListener('pointerup', onUp);
+		};
 
-	function stopResizeTextbox() {
-		isResizingTextbox = false;
-		resizeTextboxId = null;
-		resizeCorner = null;
-		resizeStart = null;
+		el.addEventListener('pointermove', onMove);
+		el.addEventListener('pointerup', onUp);
 	}
 
 	// Formatting toolbar state
@@ -225,6 +220,19 @@
 			toolbarAnchorRect = { top: rect.top, left: rect.left, width: rect.width };
 		}
 	}
+
+	$effect(() => {
+		if (!showFormattingToolbar) return;
+		const vv = window.visualViewport;
+		if (!vv) return;
+		const handler = () => refreshToolbarPosition();
+		vv.addEventListener('resize', handler);
+		vv.addEventListener('scroll', handler);
+		return () => {
+			vv.removeEventListener('resize', handler);
+			vv.removeEventListener('scroll', handler);
+		};
+	});
 
 	function captureToolbarAnchor(node: HTMLElement) {
 		const parent = node.closest('[data-textbox]') as HTMLElement;
@@ -659,10 +667,8 @@
 			}
 		}
 	}}
-	onmousemove={(e) => { handleCanvasMousemove(e); handleDragTextboxMove(e); handleResizeTextboxMove(e); }}
-	onmouseup={() => { handleCanvasMouseup(); stopDragTextbox(); stopResizeTextbox(); }}
-	onresize={refreshToolbarPosition}
-	onscroll={refreshToolbarPosition}
+	onmousemove={(e) => { handleCanvasMousemove(e); handleDragTextboxMove(e); }}
+	onmouseup={() => { handleCanvasMouseup(); stopDragTextbox(); }}
 />
 
 <!-- Fullscreen overlay -->
@@ -1031,7 +1037,7 @@
 							</div>
 							<textarea
 								bind:value={tb.text}
-								class="w-full h-full bg-transparent p-2 resize-none focus:outline-none"
+								class="w-full h-full bg-transparent p-2 resize-none focus:outline-none relative z-0"
 								style={buildTextStyle(tb)}
 								placeholder="Type here..."
 								onclick={(e) => e.stopPropagation()}
@@ -1052,6 +1058,21 @@
 									<span class="text-slate-500 italic">Click to edit</span>
 								{/if}
 							</div>
+						{/if}
+
+						{#if selectedTextboxId === tb.id}
+							<!-- Resize corner handles -->
+							{#each [
+								{ pos: 'top-0 left-0 -translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'tl' as const },
+								{ pos: 'top-0 right-0 translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'tr' as const },
+								{ pos: 'bottom-0 left-0 -translate-x-1/2 translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'bl' as const },
+								{ pos: 'bottom-0 right-0 translate-x-1/2 translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'br' as const },
+							] as handle}
+								<div
+									class="absolute {handle.pos} w-4 h-4 rounded-full bg-white border-2 border-indigo-500 {handle.cursor} z-30 touch-none"
+									onpointerdown={(e) => handleResizePointerDown(tb.id, handle.corner, e)}
+								></div>
+							{/each}
 						{/if}
 
 						{#if selectedTextboxId === tb.id && editingTextboxId !== tb.id}
