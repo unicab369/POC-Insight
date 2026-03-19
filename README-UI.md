@@ -1,0 +1,3 @@
+ToolBar
+SlideThumnails
+SlideCanvas

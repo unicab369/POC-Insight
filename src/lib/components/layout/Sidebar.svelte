@@ -8,7 +8,8 @@
 		{ href: '/financial', label: 'Financial', icon: 'dollar-sign' },
 		{ href: '/projects', label: 'Projects', icon: 'folder' },
 		{ href: '/timeline', label: 'Timeline', icon: 'timeline' },
-		{ href: '/samples', label: 'Samples', icon: 'bar-chart' }
+		{ href: '/samples', label: 'Samples', icon: 'bar-chart' },
+		{ href: '/slideshow', label: 'Slideshow', icon: 'slideshow' }
 	];
 
 	const iconPaths: Record<string, string> = {
@@ -17,7 +18,8 @@
 		'dollar-sign': 'M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6',
 		'folder': 'M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z',
 		'timeline': 'M12 2v20M5 6h14M5 12h14M5 18h14',
-		'bar-chart': 'M12 20V10M18 20V4M6 20v-4'
+		'bar-chart': 'M12 20V10M18 20V4M6 20v-4',
+		'slideshow': 'M4 3h16a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V4a1 1 0 011-1zM8 21h8M12 17v4'
 	};
 
 	function isActive(href: string): boolean {
