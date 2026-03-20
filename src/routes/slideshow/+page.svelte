@@ -42,6 +42,33 @@
 		borderWidth: number;
 		textColor: string;
 		fontSize: number;
+		fontFamily?: string;
+		bold?: boolean;
+		italic?: boolean;
+		underline?: boolean;
+		align?: 'left' | 'center' | 'right';
+		highlight?: string;
+	}
+
+	interface TableCell {
+		text: string;
+		fontFamily?: string;
+		fontSize?: number;
+		bold?: boolean;
+		italic?: boolean;
+		underline?: boolean;
+		align?: 'left' | 'center' | 'right';
+		textColor?: string;
+		highlight?: string;
+		bgColor?: string;
+	}
+
+	interface SlideTable {
+		id: number;
+		x: number; y: number; width: number; height: number;
+		rows: number; cols: number;
+		cells: TableCell[][];
+		borderColor: string;
 	}
 
 	interface Slide {
@@ -52,6 +79,7 @@
 		images: SlideImage[];
 		textboxes: TextBox[];
 		shapes: SlideShape[];
+		tables: SlideTable[];
 	}
 
 	const STORAGE_KEY = 'poc-slideshow';
@@ -70,16 +98,18 @@
 	let nextImageId = $state(saved?.nextImageId ?? 1);
 	let nextTextboxId = $state(saved?.nextTextboxId ?? 1);
 	let nextShapeId = $state(saved?.nextShapeId ?? 1);
+	let nextTableId = $state(saved?.nextTableId ?? 1);
 	let slides = $state<Slide[]>(
 		saved?.slides ?? [
-			{ id: 1, title: 'Welcome to the Presentation', description: 'Click to edit this description', isLanding: true, images: [], textboxes: [], shapes: [] }
+			{ id: 1, title: 'Welcome to the Presentation', description: 'Click to edit this description', isLanding: true, images: [], textboxes: [], shapes: [], tables: [] }
 		]
 	);
 	let selectedSlideId = $state(saved?.selectedSlideId ?? 1);
 
-	// Ensure shapes array exists on all slides (migration from old data)
+	// Ensure shapes/tables arrays exist on all slides (migration from old data)
 	for (const s of slides) {
 		if (!s.shapes) s.shapes = [];
+		if (!s.tables) s.tables = [];
 	}
 
 	$effect(() => {
@@ -89,7 +119,8 @@
 			nextId,
 			nextImageId,
 			nextTextboxId,
-			nextShapeId
+			nextShapeId,
+			nextTableId
 		};
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 	});
@@ -116,7 +147,19 @@
 	let selectedShapeId = $state<number | null>(null);
 	let editingShapeId = $state<number | null>(null);
 	let shapeToolbarAnchorRect = $state<{ top: number; left: number; width: number } | null>(null);
-	let shapeColorPickerTarget = $state<'fill' | 'border' | 'text' | null>(null);
+
+	// Table state
+	let showTablePicker = $state(false);
+	let tablePickerHoverRows = $state(0);
+	let tablePickerHoverCols = $state(0);
+	let selectedTableId = $state<number | null>(null);
+	let editingTableId = $state<number | null>(null);
+	let selectedCellRow = $state<number | null>(null);
+	let selectedCellCol = $state<number | null>(null);
+	let cellSelectionEndRow = $state<number | null>(null);
+	let cellSelectionEndCol = $state<number | null>(null);
+	let isDraggingCellSelection = $state(false);
+	let tableToolbarAnchorRect = $state<{top: number; left: number; width: number} | null>(null);
 
 	// Drawing state
 	let isDrawing = $state(false);
@@ -138,19 +181,20 @@
 	let selectedTextboxId = $state<number | null>(null);
 	let editingTextboxId = $state<number | null>(null);
 	let skipNextDeselect = false;
+	let elementWasSelected = false;
 
 	// Element dragging — uses pointer capture to bypass scroll containers
-	function startElementDragPointer(kind: 'textbox' | 'image' | 'shape', id: number, e: PointerEvent) {
+	function startElementDragPointer(kind: 'textbox' | 'image' | 'shape' | 'table', id: number, e: PointerEvent) {
 		if (!slideCanvasEl || !selectedSlide) return;
 		const item = kind === 'textbox'
 			? selectedSlide.textboxes.find((t) => t.id === id)
 			: kind === 'image'
 				? selectedSlide.images.find((i) => i.id === id)
-				: selectedSlide.shapes.find((s) => s.id === id);
+				: kind === 'shape'
+					? selectedSlide.shapes.find((s) => s.id === id)
+					: selectedSlide.tables.find((t) => t.id === id);
 		if (!item) return;
-		e.preventDefault();
 		e.stopPropagation();
-		if (canvasWrapperEl) canvasWrapperEl.style.overflow = 'hidden';
 
 		const el = e.currentTarget as HTMLElement;
 		el.setPointerCapture(e.pointerId);
@@ -160,15 +204,28 @@
 		const my = ((e.clientY - rect.top) / rect.height) * 100;
 		const offX = mx - item.x;
 		const offY = my - item.y;
-		saveHistory();
+		const startClientX = e.clientX;
+		const startClientY = e.clientY;
+		let dragging = false;
 
 		const onMove = (ev: PointerEvent) => {
+			if (!dragging) {
+				const dx = ev.clientX - startClientX;
+				const dy = ev.clientY - startClientY;
+				if (Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
+				dragging = true;
+				elementWasSelected = false;
+				saveHistory();
+				if (canvasWrapperEl) canvasWrapperEl.style.overflow = 'hidden';
+			}
 			if (!slideCanvasEl || !selectedSlide) return;
 			const it = kind === 'textbox'
 				? selectedSlide.textboxes.find((t) => t.id === id)
 				: kind === 'image'
 					? selectedSlide.images.find((i) => i.id === id)
-					: selectedSlide.shapes.find((s) => s.id === id);
+					: kind === 'shape'
+						? selectedSlide.shapes.find((s) => s.id === id)
+						: selectedSlide.tables.find((t) => t.id === id);
 			if (!it) return;
 			const r = slideCanvasEl.getBoundingClientRect();
 			const cx = ((ev.clientX - r.left) / r.width) * 100;
@@ -177,7 +234,8 @@
 			it.y = Math.max(0, Math.min(100 - it.height, cy - offY));
 			if (kind === 'textbox') refreshToolbarPosition();
 			else if (kind === 'image') refreshImageToolbarPosition();
-			else refreshShapeToolbarPosition();
+			else if (kind === 'shape') refreshShapeToolbarPosition();
+			else refreshTableToolbarPosition();
 		};
 
 		const onUp = (ev: PointerEvent) => {
@@ -185,6 +243,17 @@
 			el.removeEventListener('pointermove', onMove);
 			el.removeEventListener('pointerup', onUp);
 			if (canvasWrapperEl) canvasWrapperEl.style.overflow = '';
+			if (!dragging && elementWasSelected) {
+				if (kind === 'textbox') {
+					editingTextboxId = id;
+					showFormattingToolbar = true;
+				} else if (kind === 'shape') {
+					editingShapeId = id;
+				} else if (kind === 'table') {
+					editingTableId = id;
+				}
+				elementWasSelected = false;
+			}
 		};
 
 		el.addEventListener('pointermove', onMove);
@@ -350,12 +419,13 @@
 
 	// Formatting toolbar state
 	let showFormattingToolbar = $state(false);
-	let colorPickerTarget = $state<'text' | 'highlight' | 'bg' | null>(null);
+	let activePickerTarget = $state<'text' | 'highlight' | 'bg' | 'fill' | 'stroke' | 'layers' | null>(null);
 	let toolbarAnchorRect = $state<{ top: number; left: number; width: number } | null>(null);
 
 	function refreshToolbarPosition() {
-		if (!editingTextboxId || !slideCanvasEl) return;
-		const tbEl = slideCanvasEl.querySelector(`[data-textbox-id="${editingTextboxId}"]`) as HTMLElement | null;
+		const targetId = editingTextboxId ?? selectedTextboxId;
+		if (!targetId || !slideCanvasEl) return;
+		const tbEl = slideCanvasEl.querySelector(`[data-textbox-id="${targetId}"]`) as HTMLElement | null;
 		if (tbEl) {
 			const rect = tbEl.getBoundingClientRect();
 			toolbarAnchorRect = { top: rect.top, left: rect.left, width: rect.width };
@@ -363,7 +433,7 @@
 	}
 
 	$effect(() => {
-		if (!showFormattingToolbar) return;
+		if (selectedTextboxId == null) return;
 		const vv = window.visualViewport;
 		if (!vv) return;
 		const handler = () => refreshToolbarPosition();
@@ -402,13 +472,48 @@
 		'#a855f7', '#ec4899', '#f97316', '#06b6d4', '#64748b', '#10b981'
 	];
 
+	function hexToRgba(hex: string, alpha: number): string {
+		const r = parseInt(hex.slice(1, 3), 16);
+		const g = parseInt(hex.slice(3, 5), 16);
+		const b = parseInt(hex.slice(5, 7), 16);
+		return `rgba(${r},${g},${b},${alpha})`;
+	}
+
+	function parseColorAndOpacity(color: string | undefined): { hex: string; opacity: number } {
+		if (!color || color === 'transparent') return { hex: '#000000', opacity: 0 };
+		const rgbaMatch = color.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/);
+		if (rgbaMatch) {
+			const r = parseInt(rgbaMatch[1]).toString(16).padStart(2, '0');
+			const g = parseInt(rgbaMatch[2]).toString(16).padStart(2, '0');
+			const b = parseInt(rgbaMatch[3]).toString(16).padStart(2, '0');
+			return { hex: `#${r}${g}${b}`, opacity: rgbaMatch[4] != null ? parseFloat(rgbaMatch[4]) : 1 };
+		}
+		if (color.startsWith('#')) return { hex: color, opacity: 1 };
+		return { hex: color, opacity: 1 };
+	}
+
+	function applyBgColorWithOpacity(hex: string, opacity: number) {
+		if (opacity === 0) {
+			updateTextboxStyle('bgColor', 'transparent');
+		} else if (opacity === 1) {
+			updateTextboxStyle('bgColor', hex);
+		} else {
+			updateTextboxStyle('bgColor', hexToRgba(hex, opacity));
+		}
+	}
+
 	function getEditingTextbox(): TextBox | undefined {
 		if (!selectedSlide || editingTextboxId == null) return undefined;
 		return selectedSlide.textboxes.find((t) => t.id === editingTextboxId);
 	}
 
+	function getSelectedTextbox(): TextBox | undefined {
+		if (!selectedSlide || selectedTextboxId == null) return undefined;
+		return selectedSlide.textboxes.find((t) => t.id === selectedTextboxId);
+	}
+
 	function updateTextboxStyle<K extends keyof TextBox>(key: K, value: TextBox[K]) {
-		const tb = getEditingTextbox();
+		const tb = getSelectedTextbox();
 		if (!tb) return;
 		saveHistory();
 		tb[key] = value;
@@ -416,6 +521,10 @@
 
 	function buildTextStyle(tb: TextBox): string {
 		return `font-family:${tb.fontFamily ?? 'sans-serif'};font-size:${tb.fontSize ?? 14}px;font-weight:${tb.bold ? 'bold' : 'normal'};font-style:${tb.italic ? 'italic' : 'normal'};text-decoration:${tb.underline ? 'underline' : 'none'};text-align:${tb.align ?? 'left'};color:${tb.textColor ?? '#ffffff'};background:${tb.highlight ?? 'transparent'};`;
+	}
+
+	function buildShapeTextStyle(s: SlideShape): string {
+		return `font-family:${s.fontFamily ?? 'sans-serif'};font-size:${s.fontSize}px;font-weight:${s.bold ? 'bold' : 'normal'};font-style:${s.italic ? 'italic' : 'normal'};text-decoration:${s.underline ? 'underline' : 'none'};text-align:${s.align ?? 'center'};color:${s.textColor};background:${s.highlight ?? 'transparent'};line-height:1.3;`;
 	}
 
 	let drawRect = $derived.by(() => {
@@ -458,12 +567,18 @@
 		selectedTextboxId = null;
 		editingTextboxId = null;
 		showFormattingToolbar = false;
-		colorPickerTarget = null;
+		activePickerTarget = null;
 		selectedImageId = null;
 		activeImageId = null;
 		selectedShapeId = null;
 		editingShapeId = null;
-		shapeColorPickerTarget = null;
+		selectedTableId = null;
+		editingTableId = null;
+		selectedCellRow = null;
+		selectedCellCol = null;
+		cellSelectionEndRow = null;
+		cellSelectionEndCol = null;
+		tableToolbarAnchorRect = null;
 	}
 
 	function redo() {
@@ -479,12 +594,18 @@
 		selectedTextboxId = null;
 		editingTextboxId = null;
 		showFormattingToolbar = false;
-		colorPickerTarget = null;
+		activePickerTarget = null;
 		selectedImageId = null;
 		activeImageId = null;
 		selectedShapeId = null;
 		editingShapeId = null;
-		shapeColorPickerTarget = null;
+		selectedTableId = null;
+		editingTableId = null;
+		selectedCellRow = null;
+		selectedCellCol = null;
+		cellSelectionEndRow = null;
+		cellSelectionEndCol = null;
+		tableToolbarAnchorRect = null;
 	}
 
 	function addSlide() {
@@ -497,7 +618,8 @@
 			isLanding: false,
 			images: [],
 			textboxes: [],
-			shapes: []
+			shapes: [],
+			tables: []
 		});
 		selectedSlideId = id;
 	}
@@ -521,6 +643,12 @@
 		activeImageId = null;
 		selectedShapeId = null;
 		editingShapeId = null;
+		selectedTableId = null;
+		editingTableId = null;
+		selectedCellRow = null;
+		selectedCellCol = null;
+		cellSelectionEndRow = null;
+		cellSelectionEndCol = null;
 	}
 
 	function stopEditing() {
@@ -620,6 +748,12 @@
 			selectedImageId = null;
 			activeImageId = null;
 			editingField = null;
+			selectedTableId = null;
+			editingTableId = null;
+			selectedCellRow = null;
+			selectedCellCol = null;
+			cellSelectionEndRow = null;
+			cellSelectionEndCol = null;
 		}
 	}
 
@@ -633,6 +767,12 @@
 			selectedImageId = null;
 			activeImageId = null;
 			editingField = null;
+			selectedTableId = null;
+			editingTableId = null;
+			selectedCellRow = null;
+			selectedCellCol = null;
+			cellSelectionEndRow = null;
+			cellSelectionEndCol = null;
 		}
 	}
 
@@ -650,6 +790,7 @@
 		if ((e.target as HTMLElement).closest('[data-textbox]')) return;
 		if ((e.target as HTMLElement).closest('[data-image]')) return;
 		if ((e.target as HTMLElement).closest('[data-shape]')) return;
+		if ((e.target as HTMLElement).closest('[data-table]')) return;
 		const pos = getRelativePos(e);
 		if (!pos) return;
 		e.preventDefault();
@@ -664,7 +805,7 @@
 			selectedTextboxId = id;
 			editingTextboxId = id;
 			showFormattingToolbar = true;
-			colorPickerTarget = null;
+			activePickerTarget = null;
 			activeTool = null;
 			skipNextDeselect = true;
 			return;
@@ -691,8 +832,8 @@
 			saveHistory();
 			const id = nextShapeId++;
 			const isLine = selectedShapeType === 'line' || selectedShapeType === 'arrow';
-			const w = isLine ? 25 : 20;
-			const h = isLine ? 2 : 15;
+			const w = isLine ? 25 : 15;
+			const h = isLine ? 2 : 24;
 			const x = Math.max(0, Math.min(pos.x - w / 2, 100 - w));
 			const y = Math.max(0, Math.min(pos.y - h / 2, 100 - h));
 			selectedSlide.shapes.push({
@@ -734,10 +875,21 @@
 		e.stopPropagation();
 		if (activeTool) return;
 		selectedTextboxId = id;
-		colorPickerTarget = null;
+		activePickerTarget = null;
 		editingField = null;
 		selectedImageId = null;
 		activeImageId = null;
+		imageToolbarAnchorRect = null;
+		selectedShapeId = null;
+		editingShapeId = null;
+		shapeToolbarAnchorRect = null;
+		selectedTableId = null;
+		editingTableId = null;
+		selectedCellRow = null;
+		selectedCellCol = null;
+		cellSelectionEndRow = null;
+		cellSelectionEndCol = null;
+		tableToolbarAnchorRect = null;
 	}
 
 	function selectImage(id: number, e: MouseEvent) {
@@ -748,7 +900,19 @@
 		selectedTextboxId = null;
 		editingTextboxId = null;
 		showFormattingToolbar = false;
+		activePickerTarget = null;
+		toolbarAnchorRect = null;
 		editingField = null;
+		selectedShapeId = null;
+		editingShapeId = null;
+		shapeToolbarAnchorRect = null;
+		selectedTableId = null;
+		editingTableId = null;
+		selectedCellRow = null;
+		selectedCellCol = null;
+		cellSelectionEndRow = null;
+		cellSelectionEndCol = null;
+		tableToolbarAnchorRect = null;
 	}
 
 	function deleteImage(id: number) {
@@ -762,7 +926,7 @@
 		editingTextboxId = id;
 		editingField = null;
 		showFormattingToolbar = true;
-		colorPickerTarget = null;
+		activePickerTarget = null;
 	}
 
 	function deleteTextbox(id: number) {
@@ -794,6 +958,12 @@
 		selectedShapeId = null;
 		editingShapeId = null;
 		editingField = null;
+		selectedTableId = null;
+		editingTableId = null;
+		selectedCellRow = null;
+		selectedCellCol = null;
+		cellSelectionEndRow = null;
+		cellSelectionEndCol = null;
 	}
 
 	function selectShape(id: number, e: MouseEvent) {
@@ -801,13 +971,22 @@
 		if (activeTool) return;
 		selectedShapeId = id;
 		editingShapeId = null;
-		shapeColorPickerTarget = null;
+		activePickerTarget = null;
 		selectedTextboxId = null;
 		editingTextboxId = null;
 		showFormattingToolbar = false;
+		toolbarAnchorRect = null;
 		selectedImageId = null;
 		activeImageId = null;
+		imageToolbarAnchorRect = null;
 		editingField = null;
+		selectedTableId = null;
+		editingTableId = null;
+		selectedCellRow = null;
+		selectedCellCol = null;
+		cellSelectionEndRow = null;
+		cellSelectionEndCol = null;
+		tableToolbarAnchorRect = null;
 	}
 
 	function startEditingShape(id: number, e: MouseEvent) {
@@ -815,7 +994,7 @@
 		if (activeTool) return;
 		selectedShapeId = id;
 		editingShapeId = id;
-		shapeColorPickerTarget = null;
+		activePickerTarget = null;
 		editingField = null;
 	}
 
@@ -827,7 +1006,7 @@
 		selectedShapeId = null;
 		editingShapeId = null;
 		shapeToolbarAnchorRect = null;
-		shapeColorPickerTarget = null;
+		activePickerTarget = null;
 	}
 
 	function refreshShapeToolbarPosition() {
@@ -923,6 +1102,244 @@
 		el.addEventListener('pointerup', onUp);
 	}
 
+	// Table functions
+	function toggleTablePicker() {
+		showTablePicker = !showTablePicker;
+	}
+
+	function insertTable(rows: number, cols: number) {
+		if (!selectedSlide) return;
+		saveHistory();
+		const id = nextTableId++;
+		const w = 50;
+		const h = rows * 5;
+		const x = (100 - w) / 2;
+		const y = (100 - h) / 2;
+		const cells: TableCell[][] = [];
+		for (let r = 0; r < rows; r++) {
+			const row: TableCell[] = [];
+			for (let c = 0; c < cols; c++) {
+				row.push({ text: '' });
+			}
+			cells.push(row);
+		}
+		selectedSlide.tables.push({ id, x, y, width: w, height: h, rows, cols, cells, borderColor: '#475569' });
+		selectedTableId = id;
+		editingTableId = null;
+		selectedCellRow = null;
+		selectedCellCol = null;
+		cellSelectionEndRow = null;
+		cellSelectionEndCol = null;
+		selectedTextboxId = null;
+		editingTextboxId = null;
+		showFormattingToolbar = false;
+		selectedImageId = null;
+		activeImageId = null;
+		selectedShapeId = null;
+		editingShapeId = null;
+		showTablePicker = false;
+		skipNextDeselect = true;
+	}
+
+	function selectTable(id: number, e: MouseEvent | PointerEvent) {
+		e.stopPropagation();
+		if (activeTool) return;
+		selectedTableId = id;
+		editingTableId = null;
+		selectedCellRow = null;
+		selectedCellCol = null;
+		cellSelectionEndRow = null;
+		cellSelectionEndCol = null;
+		activePickerTarget = null;
+		selectedTextboxId = null;
+		editingTextboxId = null;
+		showFormattingToolbar = false;
+		toolbarAnchorRect = null;
+		selectedImageId = null;
+		activeImageId = null;
+		imageToolbarAnchorRect = null;
+		selectedShapeId = null;
+		editingShapeId = null;
+		shapeToolbarAnchorRect = null;
+		editingField = null;
+	}
+
+	function startEditingTable(id: number, e: MouseEvent | PointerEvent) {
+		e.stopPropagation();
+		if (activeTool) return;
+		selectedTableId = id;
+		editingTableId = id;
+		activePickerTarget = null;
+		editingField = null;
+	}
+
+	function selectCell(row: number, col: number) {
+		selectedCellRow = row;
+		selectedCellCol = col;
+		cellSelectionEndRow = row;
+		cellSelectionEndCol = col;
+	}
+
+	function getCellSelectionBounds(): { minRow: number; maxRow: number; minCol: number; maxCol: number } | null {
+		if (selectedCellRow == null || selectedCellCol == null) return null;
+		const endR = cellSelectionEndRow ?? selectedCellRow;
+		const endC = cellSelectionEndCol ?? selectedCellCol;
+		return {
+			minRow: Math.min(selectedCellRow, endR),
+			maxRow: Math.max(selectedCellRow, endR),
+			minCol: Math.min(selectedCellCol, endC),
+			maxCol: Math.max(selectedCellCol, endC)
+		};
+	}
+
+	function isCellInSelection(row: number, col: number): boolean {
+		const b = getCellSelectionBounds();
+		if (!b) return false;
+		return row >= b.minRow && row <= b.maxRow && col >= b.minCol && col <= b.maxCol;
+	}
+
+	function isMultiCellSelection(): boolean {
+		const b = getCellSelectionBounds();
+		if (!b) return false;
+		return b.minRow !== b.maxRow || b.minCol !== b.maxCol;
+	}
+
+	function deleteTable(id: number) {
+		if (!selectedSlide) return;
+		saveHistory();
+		const idx = selectedSlide.tables.findIndex((t) => t.id === id);
+		if (idx !== -1) selectedSlide.tables.splice(idx, 1);
+		selectedTableId = null;
+		editingTableId = null;
+		selectedCellRow = null;
+		selectedCellCol = null;
+		cellSelectionEndRow = null;
+		cellSelectionEndCol = null;
+		tableToolbarAnchorRect = null;
+		activePickerTarget = null;
+	}
+
+	function getSelectedTable(): SlideTable | undefined {
+		if (!selectedSlide || selectedTableId == null) return undefined;
+		return selectedSlide.tables.find((t) => t.id === selectedTableId);
+	}
+
+	function getSelectedCell(): TableCell | undefined {
+		const table = getSelectedTable();
+		if (!table || selectedCellRow == null || selectedCellCol == null) return undefined;
+		return table.cells[selectedCellRow]?.[selectedCellCol];
+	}
+
+	function updateTableCellStyle<K extends keyof TableCell>(key: K, value: TableCell[K]) {
+		const table = getSelectedTable();
+		const bounds = getCellSelectionBounds();
+		if (!table || !bounds) return;
+		saveHistory();
+		for (let r = bounds.minRow; r <= bounds.maxRow; r++) {
+			for (let c = bounds.minCol; c <= bounds.maxCol; c++) {
+				const cell = table.cells[r]?.[c];
+				if (cell) cell[key] = value;
+			}
+		}
+	}
+
+	function buildTableCellStyle(cell: TableCell): string {
+		return `font-family:${cell.fontFamily ?? 'sans-serif'};font-size:${cell.fontSize ?? 14}px;font-weight:${cell.bold ? 'bold' : 'normal'};font-style:${cell.italic ? 'italic' : 'normal'};text-decoration:${cell.underline ? 'underline' : 'none'};text-align:${cell.align ?? 'left'};color:${cell.textColor ?? '#ffffff'};background:${cell.highlight ?? 'transparent'};`;
+	}
+
+	function handleTableResizePointerDown(tableId: number, corner: 'tl' | 'tr' | 'bl' | 'br', e: PointerEvent) {
+		if (!slideCanvasEl) return;
+		const table = selectedSlide?.tables.find((t) => t.id === tableId);
+		if (!table) return;
+		e.preventDefault();
+		e.stopPropagation();
+
+		const el = e.currentTarget as HTMLElement;
+		el.setPointerCapture(e.pointerId);
+
+		const rect = slideCanvasEl.getBoundingClientRect();
+		const startX = ((e.clientX - rect.left) / rect.width) * 100;
+		const startY = ((e.clientY - rect.top) / rect.height) * 100;
+		const startTable = { x: table.x, y: table.y, w: table.width, h: table.height };
+		saveHistory();
+
+		const onMove = (ev: PointerEvent) => {
+			if (!slideCanvasEl || !selectedSlide) return;
+			const t = selectedSlide.tables.find((t) => t.id === tableId);
+			if (!t) return;
+			const r = slideCanvasEl.getBoundingClientRect();
+			const dx = ((ev.clientX - r.left) / r.width) * 100 - startX;
+			const dy = ((ev.clientY - r.top) / r.height) * 100 - startY;
+			const MIN = 5;
+			if (corner === 'br') {
+				t.width = Math.max(MIN, startTable.w + dx);
+				t.height = Math.max(MIN, startTable.h + dy);
+			} else if (corner === 'bl') {
+				const nw = Math.max(MIN, startTable.w - dx);
+				t.x = startTable.x + startTable.w - nw;
+				t.width = nw;
+				t.height = Math.max(MIN, startTable.h + dy);
+			} else if (corner === 'tr') {
+				t.width = Math.max(MIN, startTable.w + dx);
+				const nh = Math.max(MIN, startTable.h - dy);
+				t.y = startTable.y + startTable.h - nh;
+				t.height = nh;
+			} else if (corner === 'tl') {
+				const nw = Math.max(MIN, startTable.w - dx);
+				const nh = Math.max(MIN, startTable.h - dy);
+				t.x = startTable.x + startTable.w - nw;
+				t.y = startTable.y + startTable.h - nh;
+				t.width = nw;
+				t.height = nh;
+			}
+			refreshTableToolbarPosition();
+		};
+
+		const onUp = (ev: PointerEvent) => {
+			el.releasePointerCapture(ev.pointerId);
+			el.removeEventListener('pointermove', onMove);
+			el.removeEventListener('pointerup', onUp);
+		};
+
+		el.addEventListener('pointermove', onMove);
+		el.addEventListener('pointerup', onUp);
+	}
+
+	function refreshTableToolbarPosition() {
+		if (selectedTableId == null || !slideCanvasEl) return;
+		const el = slideCanvasEl.querySelector(`[data-table-id="${selectedTableId}"]`) as HTMLElement | null;
+		if (el) {
+			const rect = el.getBoundingClientRect();
+			tableToolbarAnchorRect = { top: rect.top, left: rect.left, width: rect.width };
+		}
+	}
+
+	function captureTableToolbarAnchor(node: HTMLElement) {
+		const parent = node.closest('[data-table]') as HTMLElement;
+		if (parent) {
+			const rect = parent.getBoundingClientRect();
+			tableToolbarAnchorRect = { top: rect.top, left: rect.left, width: rect.width };
+		}
+		return {
+			destroy() {
+				tableToolbarAnchorRect = null;
+			}
+		};
+	}
+
+	$effect(() => {
+		if (selectedTableId == null) return;
+		const vv = window.visualViewport;
+		if (!vv) return;
+		const handler = () => refreshTableToolbarPosition();
+		vv.addEventListener('resize', handler);
+		vv.addEventListener('scroll', handler);
+		return () => {
+			vv.removeEventListener('resize', handler);
+			vv.removeEventListener('scroll', handler);
+		};
+	});
+
 	function getSelectedShape(): SlideShape | undefined {
 		if (!selectedSlide || selectedShapeId == null) return undefined;
 		return selectedSlide.shapes.find((s) => s.id === selectedShapeId);
@@ -935,20 +1352,53 @@
 		shape[key] = value;
 	}
 
+	// Unified toolbar helpers for textbox/shape
+	function toolbarSet(key: string, value: any) {
+		if (getSelectedCell()) updateTableCellStyle(key as any, value);
+		else if (getSelectedTextbox()) updateTextboxStyle(key as any, value);
+		else if (getSelectedShape()) updateShapeStyle(key as any, value);
+	}
+
+	function moveLayer(action: 'front' | 'back' | 'forward' | 'backward') {
+		if (!selectedSlide) return;
+		let arr: any[] | null = null;
+		let id: number | null = null;
+		if (selectedTextboxId != null) { arr = selectedSlide.textboxes; id = selectedTextboxId; }
+		else if (selectedShapeId != null) { arr = selectedSlide.shapes; id = selectedShapeId; }
+		else if (selectedImageId != null) { arr = selectedSlide.images; id = selectedImageId; }
+		else if (selectedTableId != null) { arr = selectedSlide.tables; id = selectedTableId; }
+		if (!arr || id == null) return;
+		const idx = arr.findIndex((el: any) => el.id === id);
+		if (idx === -1) return;
+		saveHistory();
+		const [item] = arr.splice(idx, 1);
+		if (action === 'front') arr.push(item);
+		else if (action === 'back') arr.unshift(item);
+		else if (action === 'forward' && idx < arr.length) arr.splice(idx + 1, 0, item);
+		else if (action === 'backward' && idx > 0) arr.splice(idx - 1, 0, item);
+		else arr.splice(idx, 0, item);
+	}
+
 	function deselectAll() {
 		if (activeTool) return;
 		if (skipNextDeselect) { skipNextDeselect = false; return; }
 		selectedTextboxId = null;
 		editingTextboxId = null;
 		showFormattingToolbar = false;
-		colorPickerTarget = null;
+		activePickerTarget = null;
 		selectedImageId = null;
 		activeImageId = null;
 		imageToolbarAnchorRect = null;
 		selectedShapeId = null;
 		editingShapeId = null;
 		shapeToolbarAnchorRect = null;
-		shapeColorPickerTarget = null;
+		selectedTableId = null;
+		editingTableId = null;
+		selectedCellRow = null;
+		selectedCellCol = null;
+		cellSelectionEndRow = null;
+		cellSelectionEndCol = null;
+		tableToolbarAnchorRect = null;
 	}
 
 	function close() {
@@ -960,24 +1410,27 @@
 <svelte:window
 	onclick={(e) => {
 		const target = e.target as HTMLElement;
-		if (!target.closest('[data-editable]') && !target.closest('[data-textbox]') && !target.closest('[data-image]') && !target.closest('[data-shape]')) {
+		if (!target.closest('[data-editable]') && !target.closest('[data-textbox]') && !target.closest('[data-image]') && !target.closest('[data-shape]') && !target.closest('[data-table]')) {
 			stopEditing();
 		}
-		if (colorPickerTarget && !target.closest('[data-toolbar]')) {
-			colorPickerTarget = null;
-		}
-		if (shapeColorPickerTarget && !target.closest('[data-shape-toolbar]')) {
-			shapeColorPickerTarget = null;
+		if (activePickerTarget && !target.closest('[data-toolbar]')) {
+			activePickerTarget = null;
 		}
 		if (showShapePicker && !target.closest('[data-shape-picker]') && !target.closest('[data-shape-btn]')) {
 			showShapePicker = false;
 		}
+		if (showTablePicker && !target.closest('[data-table-picker]') && !target.closest('[data-table-btn]')) {
+			showTablePicker = false;
+		}
 	}}
 	onkeydown={(e) => {
 		if (e.key === 'Escape') {
+			if (showTablePicker) { showTablePicker = false; return; }
 			if (showShapePicker) { showShapePicker = false; return; }
-			if (shapeColorPickerTarget) { shapeColorPickerTarget = null; return; }
-			if (colorPickerTarget) { colorPickerTarget = null; return; }
+			if (activePickerTarget) { activePickerTarget = null; return; }
+			if (selectedCellRow != null) { selectedCellRow = null; selectedCellCol = null; cellSelectionEndRow = null; cellSelectionEndCol = null; tableToolbarAnchorRect = null; return; }
+			if (editingTableId) { editingTableId = null; return; }
+			if (selectedTableId) { selectedTableId = null; tableToolbarAnchorRect = null; return; }
 			if (editingShapeId) { editingShapeId = null; return; }
 			if (selectedShapeId) { selectedShapeId = null; shapeToolbarAnchorRect = null; return; }
 			if (activeImageId) { activeImageId = null; return; }
@@ -997,6 +1450,11 @@
 			redo();
 		}
 		if (e.key === 'Delete' || e.key === 'Backspace') {
+			if (selectedTableId && !editingTableId) {
+				e.preventDefault();
+				deleteTable(selectedTableId);
+				return;
+			}
 			if (selectedShapeId && !editingShapeId) {
 				e.preventDefault();
 				deleteShape(selectedShapeId);
@@ -1020,11 +1478,11 @@
 <!-- Fullscreen overlay -->
 <div class="fixed inset-0 z-[100] flex flex-col bg-slate-950">
 	<!-- Top Toolbar (full width) -->
-	<div class="h-12 shrink-0 bg-slate-900 border-b border-slate-800 flex items-center px-3 gap-1">
+	<div class="h-12 shrink-0 bg-slate-900 border-b border-slate-800 flex items-center px-3 gap-1 overflow-visible relative z-[110]">
 		<!-- Close button -->
 		<button
 			class="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
-			onclick={close}
+			onclick={(e) => { e.stopPropagation(); close(); }}
 			aria-label="Close slideshow"
 			title="Close"
 		>
@@ -1033,7 +1491,7 @@
 			</svg>
 		</button>
 
-		<div class="w-px h-6 bg-slate-700 mx-1"></div>
+		<div class="w-px h-6 bg-slate-400 mx-1"></div>
 
 		<!-- Undo / Redo -->
 		<button
@@ -1059,7 +1517,7 @@
 			</svg>
 		</button>
 
-		<div class="w-px h-6 bg-slate-700 mx-1"></div>
+		<div class="w-px h-6 bg-slate-400 mx-1"></div>
 
 		<!-- Insert: Textbox -->
 		<button
@@ -1117,34 +1575,82 @@
 
 			{#if showShapePicker}
 				<div
-					class="absolute top-full left-0 mt-2 p-2 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl z-50 grid grid-cols-4 gap-1.5"
-					data-shape-picker
+					class="absolute top-full left-0 mt-1 p-3 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl z-50 grid grid-cols-4 gap-2 w-[280px]"
+					data-shape-picker data-shape-btn
 					onclick={(e) => e.stopPropagation()}
 				>
-					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Line" onclick={() => pickShapeType('line')}>
-						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><line x1="4" y1="12" x2="20" y2="12"/></svg>
+					<button class="flex flex-col items-center gap-1 p-2 rounded-lg hover:bg-slate-700 transition-colors" title="Line" onclick={() => pickShapeType('line')}>
+						<svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><line x1="4" y1="12" x2="20" y2="12"/></svg>
+						<span class="text-[10px] text-slate-400">Line</span>
 					</button>
-					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Arrow" onclick={() => pickShapeType('arrow')}>
-						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><line x1="4" y1="12" x2="20" y2="12"/><polyline points="16,8 20,12 16,16"/></svg>
+					<button class="flex flex-col items-center gap-1 p-2 rounded-lg hover:bg-slate-700 transition-colors" title="Arrow" onclick={() => pickShapeType('arrow')}>
+						<svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><line x1="4" y1="12" x2="20" y2="12"/><polyline points="16,8 20,12 16,16"/></svg>
+						<span class="text-[10px] text-slate-400">Arrow</span>
 					</button>
-					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Square" onclick={() => pickShapeType('square')}>
-						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><rect x="4" y="4" width="16" height="16"/></svg>
+					<button class="flex flex-col items-center gap-1 p-2 rounded-lg hover:bg-slate-700 transition-colors" title="Square" onclick={() => pickShapeType('square')}>
+						<svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><rect x="4" y="4" width="16" height="16"/></svg>
+						<span class="text-[10px] text-slate-400">Square</span>
 					</button>
-					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Rounded Square" onclick={() => pickShapeType('rounded-square')}>
-						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="4"/></svg>
+					<button class="flex flex-col items-center gap-1 p-2 rounded-lg hover:bg-slate-700 transition-colors" title="Rounded" onclick={() => pickShapeType('rounded-square')}>
+						<svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="4"/></svg>
+						<span class="text-[10px] text-slate-400">Rounded</span>
 					</button>
-					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Circle" onclick={() => pickShapeType('circle')}>
-						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><ellipse cx="12" cy="12" rx="8" ry="8"/></svg>
+					<button class="flex flex-col items-center gap-1 p-2 rounded-lg hover:bg-slate-700 transition-colors" title="Circle" onclick={() => pickShapeType('circle')}>
+						<svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><ellipse cx="12" cy="12" rx="8" ry="8"/></svg>
+						<span class="text-[10px] text-slate-400">Circle</span>
 					</button>
-					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Triangle" onclick={() => pickShapeType('triangle')}>
-						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><polygon points="12,4 22,20 2,20"/></svg>
+					<button class="flex flex-col items-center gap-1 p-2 rounded-lg hover:bg-slate-700 transition-colors" title="Triangle" onclick={() => pickShapeType('triangle')}>
+						<svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><polygon points="12,4 22,20 2,20"/></svg>
+						<span class="text-[10px] text-slate-400">Triangle</span>
 					</button>
-					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Diamond" onclick={() => pickShapeType('diamond')}>
-						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><polygon points="12,3 21,12 12,21 3,12"/></svg>
+					<button class="flex flex-col items-center gap-1 p-2 rounded-lg hover:bg-slate-700 transition-colors" title="Diamond" onclick={() => pickShapeType('diamond')}>
+						<svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><polygon points="12,3 21,12 12,21 3,12"/></svg>
+						<span class="text-[10px] text-slate-400">Diamond</span>
 					</button>
-					<button class="w-12 h-12 rounded-lg hover:bg-slate-700 flex items-center justify-center transition-colors" title="Star" onclick={() => pickShapeType('star')}>
-						<svg class="w-7 h-7" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"/></svg>
+					<button class="flex flex-col items-center gap-1 p-2 rounded-lg hover:bg-slate-700 transition-colors" title="Star" onclick={() => pickShapeType('star')}>
+						<svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="#6366f1" stroke-width="2"><polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"/></svg>
+						<span class="text-[10px] text-slate-400">Star</span>
 					</button>
+				</div>
+			{/if}
+		</div>
+
+		<!-- Insert: Table -->
+		<div class="relative" data-table-btn>
+			<button
+				class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm transition-colors {showTablePicker
+					? 'bg-indigo-500/20 text-indigo-400'
+					: 'text-slate-400 hover:text-white hover:bg-slate-700'}"
+				onclick={toggleTablePicker}
+				aria-label="Insert table"
+				title="Insert Table"
+			>
+				<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+					<rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/>
+				</svg>
+				<span class="hidden lg:inline">Table</span>
+			</button>
+
+			{#if showTablePicker}
+				<div
+					class="absolute top-full left-0 mt-1 p-3 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl z-50 w-[180px]"
+					data-table-picker data-table-btn
+					onclick={(e) => e.stopPropagation()}
+				>
+					<p class="text-[10px] text-slate-400 uppercase tracking-wider mb-2 text-center">
+						{tablePickerHoverRows > 0 && tablePickerHoverCols > 0 ? `${tablePickerHoverCols} x ${tablePickerHoverRows}` : 'Select size'}
+					</p>
+					<div class="grid grid-cols-4 gap-1">
+						{#each Array(4) as _, r}
+							{#each Array(4) as _, c}
+								<button
+									class="w-8 h-8 rounded border-2 transition-colors {r < tablePickerHoverRows && c < tablePickerHoverCols ? 'bg-indigo-500/30 border-indigo-500' : 'bg-slate-700 border-slate-600 hover:border-slate-500'}"
+									onmouseenter={() => { tablePickerHoverRows = r + 1; tablePickerHoverCols = c + 1; }}
+									onclick={() => insertTable(r + 1, c + 1)}
+								></button>
+							{/each}
+						{/each}
+					</div>
 				</div>
 			{/if}
 		</div>
@@ -1168,6 +1674,12 @@
 						activeImageId = null;
 						selectedShapeId = null;
 						editingShapeId = null;
+						selectedTableId = null;
+						editingTableId = null;
+						selectedCellRow = null;
+						selectedCellCol = null;
+						cellSelectionEndRow = null;
+						cellSelectionEndCol = null;
 					}}
 				>
 					<!-- Slide number badge -->
@@ -1184,26 +1696,35 @@
 							? 'border-indigo-500 shadow-lg shadow-indigo-500/20'
 							: 'border-slate-700 hover:border-slate-600'}"
 					>
-						<div class="w-full h-full bg-slate-950 p-3 relative {slide.isLanding ? 'flex items-center justify-center' : ''}">
+						<div class="w-full h-full bg-slate-900 relative overflow-hidden">
+							<!-- Title & description -->
 							{#if slide.isLanding}
-								<div class="text-center overflow-hidden">
-									<p class="text-[8px] font-bold text-white leading-tight truncate">{slide.title}</p>
-									<p class="text-[6px] text-slate-400 mt-1 leading-tight line-clamp-2">{slide.description}</p>
+								<div class="absolute inset-0 flex items-center justify-center p-2">
+									<div class="text-center overflow-hidden">
+										<p class="text-[7px] font-bold text-white leading-tight truncate">{slide.title}</p>
+										{#if slide.description}
+											<p class="text-[5px] text-slate-400 mt-0.5 leading-tight line-clamp-2">{slide.description}</p>
+										{/if}
+									</div>
 								</div>
 							{:else}
-								<div class="overflow-hidden">
-									<p class="text-[7px] font-bold text-white leading-tight truncate">{slide.title}</p>
-									<p class="text-[5px] text-slate-400 mt-1 leading-tight line-clamp-3">{slide.description}</p>
+								<div class="p-2 overflow-hidden">
+									<p class="text-[6px] font-bold text-white leading-tight truncate">{slide.title}</p>
+									{#if slide.description}
+										<p class="text-[4px] text-slate-400 mt-0.5 leading-tight line-clamp-2">{slide.description}</p>
+									{/if}
 								</div>
 							{/if}
+							<!-- Textboxes -->
 							{#each slide.textboxes as tb}
 								<div
-									class="absolute border border-slate-600/50 overflow-hidden"
-									style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;height:{tb.height}%;background:{tb.bgColor && tb.bgColor !== 'transparent' ? tb.bgColor : 'rgba(30,41,59,0.3)'}"
+									class="absolute overflow-hidden"
+									style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%;background:{tb.bgColor && tb.bgColor !== 'transparent' ? tb.bgColor : 'transparent'}"
 								>
-									<p class="text-[4px] leading-tight p-px" style="color:{tb.textColor ?? '#94a3b8'}">{tb.text}</p>
+									<div class="p-px whitespace-pre-wrap break-words" style="font-family:{tb.fontFamily ?? 'sans-serif'};font-size:3px;font-weight:{tb.bold ? 'bold' : 'normal'};font-style:{tb.italic ? 'italic' : 'normal'};text-decoration:{tb.underline ? 'underline' : 'none'};text-align:{tb.align ?? 'left'};color:{tb.textColor ?? '#ffffff'};background:{tb.highlight ?? 'transparent'};line-height:1.2">{tb.text}</div>
 								</div>
 							{/each}
+							<!-- Images -->
 							{#each slide.images as img}
 								<div
 									class="absolute overflow-hidden rounded-sm {img.src === '' ? 'border border-dashed border-slate-600/50 bg-slate-800/30' : ''}"
@@ -1214,12 +1735,13 @@
 									{/if}
 								</div>
 							{/each}
+							<!-- Shapes -->
 							{#each (slide.shapes ?? []) as sh}
 								<div
 									class="absolute overflow-hidden"
 									style="left:{sh.x}%;top:{sh.y}%;width:{sh.width}%;height:{sh.height}%"
 								>
-									<svg class="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+									<svg class="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
 										{#if sh.type === 'circle'}
 											<ellipse cx="50" cy="50" rx="48" ry="48" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
 										{:else if sh.type === 'triangle'}
@@ -1239,6 +1761,26 @@
 											<rect x="2" y="2" width="96" height="96" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
 										{/if}
 									</svg>
+									{#if sh.text}
+										<div class="absolute inset-0 flex items-center justify-center p-px" style="font-size:3px;color:{sh.textColor};text-align:{sh.align ?? 'center'};font-weight:{sh.bold ? 'bold' : 'normal'};line-height:1.2">{sh.text}</div>
+									{/if}
+								</div>
+							{/each}
+							<!-- Tables -->
+							{#each (slide.tables ?? []) as tbl}
+								<div
+									class="absolute overflow-hidden"
+									style="left:{tbl.x}%;top:{tbl.y}%;width:{tbl.width}%;height:{tbl.height}%"
+								>
+									<table class="w-full h-full" style="border-collapse:collapse;table-layout:fixed">
+										{#each tbl.cells as row}
+											<tr>
+												{#each row as c}
+													<td class="border border-slate-600/50" style="font-size:3px;color:{c.textColor ?? '#ffffff'};background:{c.bgColor ?? 'transparent'};padding:0 1px;line-height:1.2;vertical-align:top">{c.text}</td>
+												{/each}
+											</tr>
+										{/each}
+									</table>
 								</div>
 							{/each}
 						</div>
@@ -1278,7 +1820,7 @@
 
 	<!-- Right Panel: Slide Canvas -->
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div bind:this={canvasWrapperEl} class="flex-1 flex items-center justify-center bg-slate-950 p-8 overflow-auto" onwheel={handleCanvasWheel}>
+	<div bind:this={canvasWrapperEl} class="flex-1 flex items-center justify-center bg-slate-950 p-8 overflow-auto relative" onwheel={handleCanvasWheel}>
 		{#if selectedSlide}
 			<div
 				bind:this={slideCanvasEl}
@@ -1289,7 +1831,7 @@
 				onmousedown={handleCanvasMousedown}
 				onclick={(e) => {
 					const t = e.target as HTMLElement;
-					if (!t.closest('[data-textbox]') && !t.closest('[data-editable]') && !t.closest('[data-image]') && !t.closest('[data-shape]')) {
+					if (!t.closest('[data-textbox]') && !t.closest('[data-editable]') && !t.closest('[data-image]') && !t.closest('[data-shape]') && !t.closest('[data-table]')) {
 						deselectAll();
 					}
 				}}
@@ -1411,7 +1953,7 @@
 						data-textbox
 						data-textbox-id={tb.id}
 						class="absolute border-2 rounded transition-colors touch-none {selectedTextboxId === tb.id
-							? 'border-indigo-500 shadow-lg shadow-indigo-500/10'
+							? 'border-indigo-500 shadow-lg shadow-indigo-500/10 z-20'
 							: 'border-slate-600 hover:border-slate-500'}"
 						style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%;background:{tb.bgColor ?? 'transparent'}"
 						role="button"
@@ -1420,15 +1962,15 @@
 							if ((e.target as HTMLElement).tagName === 'TEXTAREA') return;
 							if (activeTool) return;
 							if (editingTextboxId === tb.id) return;
+							elementWasSelected = selectedTextboxId === tb.id;
 							e.preventDefault();
 							selectTextbox(tb.id, e);
 							startElementDragPointer('textbox', tb.id, e);
 						}}
-						ondblclick={(e) => startEditingTextbox(tb.id, e)}
 						onkeydown={(e) => e.key === 'Enter' && startEditingTextbox(tb.id, new MouseEvent('click'))}
 					>
 						<!-- Toolbar position anchor -->
-						{#if editingTextboxId === tb.id && showFormattingToolbar}
+						{#if selectedTextboxId === tb.id}
 							<div class="hidden" use:captureToolbarAnchor></div>
 						{/if}
 
@@ -1449,7 +1991,7 @@
 								}}
 								onkeydown={(e) => {
 									if (e.key === 'Escape') {
-										if (colorPickerTarget) { colorPickerTarget = null; }
+										if (activePickerTarget) { activePickerTarget = null; }
 										else { editingTextboxId = null; showFormattingToolbar = false; }
 									}
 									e.stopPropagation();
@@ -1484,7 +2026,7 @@
 						{#if selectedTextboxId === tb.id && editingTextboxId !== tb.id}
 							<button
 								data-no-drag
-								class="absolute -top-3 -right-3 w-6 h-6 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center transition-colors z-30"
+								class="absolute top-1/2 -translate-y-1/2 -right-3 w-6 h-6 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center transition-colors z-30"
 								onclick={(e) => {
 									e.stopPropagation();
 									deleteTextbox(tb.id);
@@ -1506,7 +2048,7 @@
 						data-image
 						data-image-id={image.id}
 						class="absolute rounded transition-colors touch-none {selectedImageId === image.id
-							? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10'
+							? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10 z-20'
 							: image.src === ''
 								? 'border-2 border-dashed border-slate-600 hover:border-slate-500'
 								: 'border-2 border-slate-600 hover:border-slate-500'}"
@@ -1555,7 +2097,7 @@
 							<!-- Delete button -->
 							<button
 								data-no-drag
-								class="absolute -top-3 -right-3 w-6 h-6 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center transition-colors z-30"
+								class="absolute top-1/2 -translate-y-1/2 -right-3 w-6 h-6 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center transition-colors z-30"
 								onclick={(e) => {
 									e.stopPropagation();
 									deleteImage(image.id);
@@ -1576,8 +2118,8 @@
 					<div
 						data-shape
 						data-shape-id={shape.id}
-						class="absolute transition-colors {selectedShapeId === shape.id
-							? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10'
+						class="absolute transition-colors touch-none {selectedShapeId === shape.id
+							? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10 z-20'
 							: 'hover:ring-1 hover:ring-slate-500'}"
 						style="left:{shape.x}%;top:{shape.y}%;width:{shape.width}%;height:{shape.height}%"
 						role="button"
@@ -1586,10 +2128,11 @@
 							if ((e.target as HTMLElement).tagName === 'TEXTAREA') return;
 							if (activeTool) return;
 							if (editingShapeId === shape.id) return;
+							elementWasSelected = selectedShapeId === shape.id;
+							e.preventDefault();
 							selectShape(shape.id, e);
 							startElementDragPointer('shape', shape.id, e);
 						}}
-						ondblclick={(e) => startEditingShape(shape.id, e)}
 						onkeydown={(e) => e.key === 'Enter' && startEditingShape(shape.id, new MouseEvent('click'))}
 					>
 						<!-- Toolbar position anchor -->
@@ -1623,13 +2166,13 @@
 						{#if editingShapeId === shape.id}
 							<textarea
 								bind:value={shape.text}
-								class="absolute inset-0 w-full h-full bg-transparent p-2 resize-none focus:outline-none text-center flex items-center justify-center z-10"
-								style="font-size:{shape.fontSize}px;color:{shape.textColor};line-height:1.3"
+								class="absolute inset-0 w-full h-full bg-transparent p-2 resize-none focus:outline-none z-10"
+								style="{buildShapeTextStyle(shape)}display:flex;align-items:center;justify-content:center"
 								placeholder="Type..."
 								onclick={(e) => e.stopPropagation()}
 								onkeydown={(e) => {
 									if (e.key === 'Escape') {
-										if (shapeColorPickerTarget) { shapeColorPickerTarget = null; }
+										if (activePickerTarget) { activePickerTarget = null; }
 										else { editingShapeId = null; }
 									}
 									e.stopPropagation();
@@ -1637,19 +2180,25 @@
 								autofocus
 							></textarea>
 						{:else if shape.text}
-							<div class="absolute inset-0 flex items-center justify-center text-center p-2 pointer-events-none z-10" style="font-size:{shape.fontSize}px;color:{shape.textColor};line-height:1.3">
+							<div class="absolute inset-0 flex items-center justify-center p-2 pointer-events-none z-10" style="{buildShapeTextStyle(shape)}">
 								{shape.text}
 							</div>
 						{/if}
 
 						{#if selectedShapeId === shape.id}
 							<!-- Resize corner handles -->
-							{#each [
-								{ pos: 'top-0 left-0 -translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'tl' as const },
-								{ pos: 'top-0 right-0 translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'tr' as const },
-								{ pos: 'bottom-0 left-0 -translate-x-1/2 translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'bl' as const },
-								{ pos: 'bottom-0 right-0 translate-x-1/2 translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'br' as const },
-							] as handle}
+							{#each (shape.type === 'line' || shape.type === 'arrow'
+								? [
+									{ pos: 'top-1/2 left-0 -translate-x-1/2 -translate-y-1/2', cursor: 'cursor-ew-resize', corner: 'tl' as const },
+									{ pos: 'top-1/2 right-0 translate-x-1/2 -translate-y-1/2', cursor: 'cursor-ew-resize', corner: 'tr' as const },
+								]
+								: [
+									{ pos: 'top-0 left-0 -translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'tl' as const },
+									{ pos: 'top-0 right-0 translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'tr' as const },
+									{ pos: 'bottom-0 left-0 -translate-x-1/2 translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'bl' as const },
+									{ pos: 'bottom-0 right-0 translate-x-1/2 translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'br' as const },
+								]
+							) as handle}
 								<div
 									class="absolute {handle.pos} w-4 h-4 rounded-full bg-white border-2 border-indigo-500 {handle.cursor} z-30 touch-none"
 									onpointerdown={(e) => handleShapeResizePointerDown(shape.id, handle.corner, e)}
@@ -1660,7 +2209,7 @@
 							{#if editingShapeId !== shape.id}
 								<button
 									data-no-drag
-									class="absolute -top-3 -right-3 w-6 h-6 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center transition-colors z-30"
+									class="absolute top-1/2 -translate-y-1/2 -right-3 w-6 h-6 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center transition-colors z-30"
 									onclick={(e) => {
 										e.stopPropagation();
 										deleteShape(shape.id);
@@ -1676,178 +2225,525 @@
 						{/if}
 					</div>
 				{/each}
+
+				<!-- Tables layer -->
+				{#each selectedSlide.tables as table (table.id)}
+					<div
+						data-table
+						data-table-id={table.id}
+						class="absolute transition-colors touch-none {selectedTableId === table.id
+							? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10 z-20'
+							: 'hover:ring-1 hover:ring-slate-500'}"
+						style="left:{table.x}%;top:{table.y}%;width:{table.width}%;height:{table.height}%"
+						role="button"
+						tabindex="0"
+						onpointerdown={(e) => {
+							if ((e.target as HTMLElement).tagName === 'TEXTAREA') return;
+							if (activeTool) return;
+							if (editingTableId === table.id) return;
+							if (selectedTableId === table.id) {
+								// Already selected → enter edit mode and select the clicked cell
+								e.preventDefault();
+								e.stopPropagation();
+								editingTableId = table.id;
+								const tdEl = document.elementFromPoint(e.clientX, e.clientY)?.closest('td');
+								const tblEl = tdEl?.closest('table');
+								if (tdEl && tblEl) {
+									const tr = tdEl.parentElement;
+									if (tr) {
+										const rows = Array.from(tblEl.querySelectorAll(':scope > tr, :scope > tbody > tr'));
+										const ri = rows.indexOf(tr as HTMLTableRowElement);
+										const ci = Array.from(tr.children).indexOf(tdEl);
+										if (ri >= 0 && ci >= 0) {
+											selectedCellRow = ri;
+											selectedCellCol = ci;
+											cellSelectionEndRow = ri;
+											cellSelectionEndCol = ci;
+										}
+									}
+								}
+								// Set up drag-to-select listeners so second click can also drag
+								isDraggingCellSelection = true;
+								const onMove = (ev: PointerEvent) => {
+									if (!tblEl) return;
+									const tdTarget = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('td');
+									if (!tdTarget || !tblEl.contains(tdTarget)) return;
+									const tr2 = tdTarget.parentElement;
+									if (!tr2) return;
+									const rows2 = Array.from(tblEl.querySelectorAll(':scope > tr, :scope > tbody > tr'));
+									const rowIdx = rows2.indexOf(tr2 as HTMLTableRowElement);
+									const colIdx = Array.from(tr2.children).indexOf(tdTarget);
+									if (rowIdx >= 0 && colIdx >= 0 && (rowIdx !== cellSelectionEndRow || colIdx !== cellSelectionEndCol)) {
+										cellSelectionEndRow = rowIdx;
+										cellSelectionEndCol = colIdx;
+									}
+								};
+								const onUp = () => {
+									isDraggingCellSelection = false;
+									window.removeEventListener('pointermove', onMove);
+									window.removeEventListener('pointerup', onUp);
+								};
+								window.addEventListener('pointermove', onMove);
+								window.addEventListener('pointerup', onUp);
+								skipNextDeselect = true;
+								return;
+							}
+							e.preventDefault();
+							selectTable(table.id, e);
+							startElementDragPointer('table', table.id, e);
+						}}
+						onkeydown={(e) => e.key === 'Enter' && startEditingTable(table.id, new MouseEvent('click'))}
+					>
+						<!-- Toolbar position anchor -->
+						{#if selectedTableId === table.id}
+							<div class="hidden" use:captureTableToolbarAnchor></div>
+						{/if}
+
+						<table
+							class="w-full h-full select-none"
+							style="border-collapse:collapse;table-layout:fixed"
+						>
+							{#each table.cells as row, ri}
+								<tr>
+									{#each row as cell, ci}
+										<td
+											class="relative {editingTableId === table.id ? 'border border-slate-500' : 'border border-slate-700/50'} {isCellInSelection(ri, ci) && editingTableId === table.id ? 'ring-2 ring-inset ring-indigo-500' : ''}"
+											style="background:{cell.bgColor ?? 'transparent'};vertical-align:top"
+											onpointerdown={(e) => {
+												if (editingTableId !== table.id) return;
+												e.stopPropagation();
+												e.preventDefault();
+												selectedCellRow = ri;
+												selectedCellCol = ci;
+												cellSelectionEndRow = ri;
+												cellSelectionEndCol = ci;
+												isDraggingCellSelection = true;
+												const tableEl = (e.currentTarget as HTMLElement).closest('table');
+												const onMove = (ev: PointerEvent) => {
+													if (!tableEl) return;
+													const tdTarget = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('td');
+													if (!tdTarget || !tableEl.contains(tdTarget)) return;
+													const tr2 = tdTarget.parentElement;
+													if (!tr2) return;
+													const rows2 = Array.from(tableEl.querySelectorAll(':scope > tr, :scope > tbody > tr'));
+													const rowIdx = rows2.indexOf(tr2 as HTMLTableRowElement);
+													const colIdx = Array.from(tr2.children).indexOf(tdTarget);
+													if (rowIdx >= 0 && colIdx >= 0 && (rowIdx !== cellSelectionEndRow || colIdx !== cellSelectionEndCol)) {
+														cellSelectionEndRow = rowIdx;
+														cellSelectionEndCol = colIdx;
+													}
+												};
+												const onUp = () => {
+													isDraggingCellSelection = false;
+													window.removeEventListener('pointermove', onMove);
+													window.removeEventListener('pointerup', onUp);
+												};
+												window.addEventListener('pointermove', onMove);
+												window.addEventListener('pointerup', onUp);
+											}}
+										>
+											{#if editingTableId === table.id && selectedCellRow === ri && selectedCellCol === ci && !isMultiCellSelection()}
+												<textarea
+													bind:value={cell.text}
+													class="w-full h-full bg-transparent p-1 resize-none focus:outline-none text-white"
+													style={buildTableCellStyle(cell)}
+													placeholder=""
+													onclick={(e) => e.stopPropagation()}
+													onkeydown={(e) => {
+														if (e.key === 'Tab') {
+															e.preventDefault();
+															let nr = ri, nc = ci + 1;
+															if (nc >= table.cols) { nc = 0; nr = (ri + 1) % table.rows; }
+															selectCell(nr, nc);
+														}
+														if (e.key === 'Escape') {
+															if (activePickerTarget) { activePickerTarget = null; }
+															else { selectedCellRow = null; selectedCellCol = null; cellSelectionEndRow = null; cellSelectionEndCol = null; tableToolbarAnchorRect = null; }
+														}
+														e.stopPropagation();
+													}}
+													autofocus
+												></textarea>
+											{:else}
+												<div class="w-full p-1 whitespace-pre-wrap break-words min-h-[1.5em]" style={buildTableCellStyle(cell)}>
+													{cell.text}
+												</div>
+											{/if}
+										</td>
+									{/each}
+								</tr>
+							{/each}
+						</table>
+
+						{#if selectedTableId === table.id}
+							<!-- Resize corner handles -->
+							{#each [
+								{ pos: 'top-0 left-0 -translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'tl' as const },
+								{ pos: 'top-0 right-0 translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'tr' as const },
+								{ pos: 'bottom-0 left-0 -translate-x-1/2 translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'bl' as const },
+								{ pos: 'bottom-0 right-0 translate-x-1/2 translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'br' as const },
+							] as handle}
+								<div
+									class="absolute {handle.pos} w-4 h-4 rounded-full bg-white border-2 border-indigo-500 {handle.cursor} z-30 touch-none"
+									onpointerdown={(e) => handleTableResizePointerDown(table.id, handle.corner, e)}
+								></div>
+							{/each}
+
+							<!-- Delete button -->
+							{#if editingTableId !== table.id}
+								<button
+									data-no-drag
+									class="absolute top-1/2 -translate-y-1/2 -right-3 w-6 h-6 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center transition-colors z-30"
+									onclick={(e) => {
+										e.stopPropagation();
+										deleteTable(table.id);
+									}}
+									onpointerdown={(e) => e.stopPropagation()}
+									aria-label="Delete table"
+								>
+									<svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+										<path d="M18 6L6 18M6 6l12 12" />
+									</svg>
+								</button>
+							{/if}
+						{/if}
+					</div>
+				{/each}
+			</div>
+		{/if}
+
+		<!-- Snackbar hint when placing tool is active -->
+		{#if activeTool === 'textbox' || activeTool === 'image' || activeTool === 'shape'}
+			<div class="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 px-4 py-2 bg-slate-800 border border-slate-600 rounded-lg shadow-xl text-sm text-slate-300 flex items-center gap-2 pointer-events-none">
+				<svg class="w-4 h-4 text-indigo-400 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M15 15l-2 5L9 9l11 4-5 2z"/></svg>
+				Click on the slide to place {activeTool === 'textbox' ? 'a text box' : activeTool === 'image' ? 'an image' : 'a shape'}
 			</div>
 		{/if}
 	</div>
 	</div>
 
-	<!-- Floating Formatting Toolbar (fixed, escapes all overflow) -->
-	{#if showFormattingToolbar && toolbarAnchorRect && getEditingTextbox()}
-		{@const tb = getEditingTextbox()!}
+	<!-- Unified Formatting Toolbar (textbox + shape + table cell) -->
+	{#if (selectedTextboxId != null && toolbarAnchorRect && getSelectedTextbox()) || (selectedShapeId != null && shapeToolbarAnchorRect && getSelectedShape()) || (selectedTableId != null && tableToolbarAnchorRect && getSelectedCell())}
+		{@const isTable = selectedTableId != null && tableToolbarAnchorRect != null && getSelectedCell() != null}
+		{@const isShape = !isTable && selectedShapeId != null && shapeToolbarAnchorRect != null && getSelectedShape() != null}
+		{@const anchorRect = isTable ? tableToolbarAnchorRect! : isShape ? shapeToolbarAnchorRect! : toolbarAnchorRect!}
+		{@const pickerBelow = (anchorRect.top - 100) < window.innerHeight / 2}
+		{@const tb = (!isShape && !isTable) ? getSelectedTextbox()! : null}
+		{@const shape = isShape ? getSelectedShape()! : null}
+		{@const cell = isTable ? getSelectedCell()! : null}
+		{@const defaultAlign = isShape ? 'center' : 'left'}
 		<div
-			class="fixed z-[150] flex items-center gap-1.5 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 shadow-xl whitespace-nowrap"
+			class="fixed z-[150] bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 shadow-xl whitespace-nowrap"
 			data-toolbar
-			style="top:{toolbarAnchorRect.top - 70}px;left:{slideCanvasEl ? slideCanvasEl.getBoundingClientRect().left + slideCanvasEl.getBoundingClientRect().width / 2 : 0}px;transform:translateX(-50%)"
+			style="top:{anchorRect.top - 100}px;left:{slideCanvasEl ? slideCanvasEl.getBoundingClientRect().left + slideCanvasEl.getBoundingClientRect().width / 2 : 0}px;transform:translateX(-50%)"
 			onclick={(e) => e.stopPropagation()}
-			onmousedown={(e) => e.preventDefault()}
+			onmousedown={(e) => { if (!(e.target instanceof HTMLSelectElement)) e.preventDefault(); }}
 		>
-			<!-- Font family -->
-			<select
-				class="bg-slate-700 text-white text-sm rounded-lg px-2 py-1.5 border border-slate-600 focus:outline-none focus:border-indigo-500 max-w-[120px]"
-				value={tb.fontFamily ?? 'sans-serif'}
-				onchange={(e) => updateTextboxStyle('fontFamily', (e.target as HTMLSelectElement).value)}
-			>
-				{#each fontOptions as opt}
-					<option value={opt.value}>{opt.label}</option>
-				{/each}
-			</select>
-
-			<!-- Font size -->
-			<div class="flex items-center gap-1 ml-1">
-				<button
-					class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-600 text-sm"
-					onclick={() => updateTextboxStyle('fontSize', Math.max(8, (tb.fontSize ?? 14) - 2))}
-					title="Decrease font size"
-				>&minus;</button>
-				<span class="text-sm text-slate-300 w-7 text-center">{tb.fontSize ?? 14}</span>
-				<button
-					class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-600 text-sm"
-					onclick={() => updateTextboxStyle('fontSize', Math.min(72, (tb.fontSize ?? 14) + 2))}
-					title="Increase font size"
-				>+</button>
-			</div>
-
-			<div class="w-px h-7 bg-slate-600 mx-1"></div>
-
-			<!-- Bold -->
-			<button
-				class="w-8 h-8 flex items-center justify-center rounded-lg text-sm font-bold transition-colors {tb.bold ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
-				onclick={() => updateTextboxStyle('bold', !tb.bold)}
-				title="Bold"
-			>B</button>
-			<!-- Italic -->
-			<button
-				class="w-8 h-8 flex items-center justify-center rounded-lg text-sm italic transition-colors {tb.italic ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
-				onclick={() => updateTextboxStyle('italic', !tb.italic)}
-				title="Italic"
-			>I</button>
-			<!-- Underline -->
-			<button
-				class="w-8 h-8 flex items-center justify-center rounded-lg text-sm underline transition-colors {tb.underline ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
-				onclick={() => updateTextboxStyle('underline', !tb.underline)}
-				title="Underline"
-			>U</button>
-
-			<div class="w-px h-7 bg-slate-600 mx-1"></div>
-
-			<!-- Alignment -->
-			<button
-				class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors {(tb.align ?? 'left') === 'left' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
-				onclick={() => updateTextboxStyle('align', 'left')}
-				title="Align left"
-			>
-				<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 6h18M3 12h12M3 18h16"/></svg>
-			</button>
-			<button
-				class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors {tb.align === 'center' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
-				onclick={() => updateTextboxStyle('align', 'center')}
-				title="Align center"
-			>
-				<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 6h18M6 12h12M5 18h14"/></svg>
-			</button>
-			<button
-				class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors {tb.align === 'right' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
-				onclick={() => updateTextboxStyle('align', 'right')}
-				title="Align right"
-			>
-				<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 6h18M9 12h12M5 18h16"/></svg>
-			</button>
-
-			<div class="w-px h-7 bg-slate-600 mx-1"></div>
-
-			<!-- Text color -->
-			<div class="relative">
-				<button
-					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors text-sm font-bold hover:bg-slate-600"
-					style="color:{tb.textColor ?? '#ffffff'}"
-					onclick={() => { colorPickerTarget = colorPickerTarget === 'text' ? null : 'text'; }}
-					title="Text color"
-				>A
-					<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{tb.textColor ?? '#ffffff'}"></span>
-				</button>
-				{#if colorPickerTarget === 'text'}
-					<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 grid grid-cols-6 gap-2" data-toolbar>
-						{#each presetColors as c}
-							<button
-								class="w-7 h-7 rounded-lg border-2 transition-transform hover:scale-110 {c === (tb.textColor ?? '#ffffff') ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-500'}"
-								style="background:{c}"
-								onclick={() => { updateTextboxStyle('textColor', c); colorPickerTarget = null; }}
-							></button>
-						{/each}
-					</div>
-				{/if}
-			</div>
-
-			<!-- Highlight color -->
-			<div class="relative">
-				<button
-					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600 text-slate-400"
-					title="Highlight color"
-					onclick={() => { colorPickerTarget = colorPickerTarget === 'highlight' ? null : 'highlight'; }}
+			<!-- Row 1: Font family, size, B I U -->
+			<div class="flex items-center gap-1.5">
+				<select
+					class="bg-slate-700 text-white text-sm rounded-lg px-2 py-1.5 border border-slate-600 focus:outline-none focus:border-indigo-500 max-w-[120px]"
+					value={(tb?.fontFamily ?? shape?.fontFamily ?? cell?.fontFamily) ?? 'sans-serif'}
+					onchange={(e) => toolbarSet('fontFamily', (e.target as HTMLSelectElement).value)}
 				>
-					<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/>
-					</svg>
-					<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{(tb.highlight && tb.highlight !== 'transparent') ? tb.highlight : '#64748b'}"></span>
-				</button>
-				{#if colorPickerTarget === 'highlight'}
-					<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 grid grid-cols-6 gap-2" data-toolbar>
-						<button
-							class="w-7 h-7 rounded-lg border-2 border-slate-500 transition-transform hover:scale-110 flex items-center justify-center text-slate-400 text-xs"
-							style="background:repeating-conic-gradient(#475569 0% 25%, #334155 0% 50%) 50% / 8px 8px"
-							onclick={() => { updateTextboxStyle('highlight', 'transparent'); colorPickerTarget = null; }}
-							title="None"
-						></button>
-						{#each presetColors as c}
-							<button
-								class="w-7 h-7 rounded-lg border-2 transition-transform hover:scale-110 {c === (tb.highlight ?? 'transparent') ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-500'}"
-								style="background:{c}"
-								onclick={() => { updateTextboxStyle('highlight', c); colorPickerTarget = null; }}
-							></button>
-						{/each}
-					</div>
-				{/if}
+					{#each fontOptions as opt}
+						<option value={opt.value}>{opt.label}</option>
+					{/each}
+				</select>
+
+				<div class="flex items-center gap-1 ml-1">
+					<button
+						class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-600 text-sm"
+						onclick={() => toolbarSet('fontSize', Math.max(8, ((tb?.fontSize ?? shape?.fontSize ?? cell?.fontSize) ?? 14) - 2))}
+						title="Decrease font size"
+					>&minus;</button>
+					<span class="text-sm text-slate-300 w-7 text-center">{(tb?.fontSize ?? shape?.fontSize) ?? 14}</span>
+					<button
+						class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-600 text-sm"
+						onclick={() => toolbarSet('fontSize', Math.min(72, ((tb?.fontSize ?? shape?.fontSize ?? cell?.fontSize) ?? 14) + 2))}
+						title="Increase font size"
+					>+</button>
+				</div>
+
+				<div class="w-px h-7 bg-slate-600 mx-1"></div>
+
+				<button
+					class="w-8 h-8 flex items-center justify-center rounded-lg text-sm font-bold transition-colors {(tb?.bold ?? shape?.bold ?? cell?.bold) ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
+					onclick={() => toolbarSet('bold', !(tb?.bold ?? shape?.bold ?? cell?.bold))}
+					title="Bold"
+				>B</button>
+				<button
+					class="w-8 h-8 flex items-center justify-center rounded-lg text-sm italic transition-colors {(tb?.italic ?? shape?.italic ?? cell?.italic) ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
+					onclick={() => toolbarSet('italic', !(tb?.italic ?? shape?.italic ?? cell?.italic))}
+					title="Italic"
+				>I</button>
+				<button
+					class="w-8 h-8 flex items-center justify-center rounded-lg text-sm underline transition-colors {(tb?.underline ?? shape?.underline ?? cell?.underline) ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
+					onclick={() => toolbarSet('underline', !(tb?.underline ?? shape?.underline ?? cell?.underline))}
+					title="Underline"
+				>U</button>
 			</div>
 
-			<!-- Background color -->
-			<div class="relative">
+			<div class="h-px bg-slate-600 my-1.5"></div>
+
+			<!-- Row 2: Alignment, colors, stroke -->
+			<div class="flex items-center gap-1.5">
+				<!-- Alignment -->
 				<button
-					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600 text-slate-400"
-					title="Background color"
-					onclick={() => { colorPickerTarget = colorPickerTarget === 'bg' ? null : 'bg'; }}
+					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors {((tb?.align ?? shape?.align ?? cell?.align) ?? defaultAlign) === 'left' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
+					onclick={() => toolbarSet('align', 'left')}
+					title="Align left"
 				>
-					<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<rect x="3" y="3" width="18" height="18" rx="2"/>
-					</svg>
-					<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{(tb.bgColor && tb.bgColor !== 'transparent') ? tb.bgColor : '#64748b'}"></span>
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 6h18M3 12h12M3 18h16"/></svg>
 				</button>
-				{#if colorPickerTarget === 'bg'}
-					<div class="absolute bottom-full right-0 mb-2 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 grid grid-cols-6 gap-2" data-toolbar>
+				<button
+					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors {((tb?.align ?? shape?.align ?? cell?.align) ?? defaultAlign) === 'center' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
+					onclick={() => toolbarSet('align', 'center')}
+					title="Align center"
+				>
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 6h18M6 12h12M5 18h14"/></svg>
+				</button>
+				<button
+					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors {((tb?.align ?? shape?.align ?? cell?.align) ?? defaultAlign) === 'right' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
+					onclick={() => toolbarSet('align', 'right')}
+					title="Align right"
+				>
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 6h18M9 12h12M5 18h16"/></svg>
+				</button>
+
+				<div class="w-px h-7 bg-slate-600 mx-1"></div>
+
+				<!-- Text color -->
+				<div class="relative">
+					<button
+						class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors text-sm font-bold hover:bg-slate-600"
+						style="color:{(tb?.textColor ?? shape?.textColor ?? cell?.textColor) ?? '#ffffff'}"
+						onclick={() => { activePickerTarget = activePickerTarget === 'text' ? null : 'text'; }}
+						title="Text color"
+					>A
+						<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{(tb?.textColor ?? shape?.textColor ?? cell?.textColor) ?? '#ffffff'}"></span>
+					</button>
+					{#if activePickerTarget === 'text'}
+						<div class="absolute {pickerBelow ? 'top-full mt-2' : 'bottom-full mb-2'} right-0 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 w-[220px]" data-toolbar>
+							<p class="text-[10px] text-slate-400 uppercase tracking-wider mb-2">Text Color</p>
+							<div class="grid grid-cols-7 gap-1.5">
+								{#each presetColors as c}
+									<button
+										class="w-7 h-7 rounded-full border-2 transition-transform hover:scale-110 {c === ((tb?.textColor ?? shape?.textColor ?? cell?.textColor) ?? '#ffffff') ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-600'}"
+										style="background:{c}"
+										onclick={() => { toolbarSet('textColor', c); activePickerTarget = null; }}
+									></button>
+								{/each}
+								<button
+									class="w-7 h-7 rounded-full border-2 border-dashed border-slate-500 hover:border-slate-300 flex items-center justify-center transition-colors"
+									title="Custom color"
+									onclick={() => {
+										const input = document.createElement('input');
+										input.type = 'color';
+										input.value = (tb?.textColor ?? shape?.textColor ?? cell?.textColor) ?? '#ffffff';
+										input.oninput = () => { toolbarSet('textColor', input.value); };
+										input.click();
+									}}
+								>
+									<svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+								</button>
+							</div>
+						</div>
+					{/if}
+				</div>
+
+				<!-- Highlight color -->
+				<div class="relative">
+					<button
+						class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600 text-slate-400"
+						title="Highlight color"
+						onclick={() => { activePickerTarget = activePickerTarget === 'highlight' ? null : 'highlight'; }}
+					>
+						<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/>
+						</svg>
+						<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{(tb?.highlight ?? shape?.highlight ?? cell?.highlight) && (tb?.highlight ?? shape?.highlight ?? cell?.highlight) !== 'transparent' ? (tb?.highlight ?? shape?.highlight ?? cell?.highlight) : '#64748b'}"></span>
+					</button>
+					{#if activePickerTarget === 'highlight'}
+						{@const hlVal = (tb?.highlight ?? shape?.highlight ?? cell?.highlight) ?? 'transparent'}
+						<div class="absolute {pickerBelow ? 'top-full mt-2' : 'bottom-full mb-2'} right-0 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 w-[220px]" data-toolbar>
+							<p class="text-[10px] text-slate-400 uppercase tracking-wider mb-2">Highlight</p>
+							<div class="grid grid-cols-7 gap-1.5">
+								<button
+									class="w-7 h-7 rounded-full border-2 border-slate-500 transition-transform hover:scale-110 {hlVal === 'transparent' ? 'ring-2 ring-indigo-400/50' : ''}"
+									style="background:repeating-conic-gradient(#475569 0% 25%, #334155 0% 50%) 50% / 8px 8px"
+									onclick={() => { toolbarSet('highlight', 'transparent'); activePickerTarget = null; }}
+									title="None"
+								></button>
+								{#each presetColors as c}
+									<button
+										class="w-7 h-7 rounded-full border-2 transition-transform hover:scale-110 {c === hlVal ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-600'}"
+										style="background:{c}"
+										onclick={() => { toolbarSet('highlight', c); activePickerTarget = null; }}
+									></button>
+								{/each}
+								<button
+									class="w-7 h-7 rounded-full border-2 border-dashed border-slate-500 hover:border-slate-300 flex items-center justify-center transition-colors"
+									title="Custom color"
+									onclick={() => {
+										const input = document.createElement('input');
+										input.type = 'color';
+										input.value = (hlVal !== 'transparent') ? hlVal : '#eab308';
+										input.oninput = () => { toolbarSet('highlight', input.value); };
+										input.click();
+									}}
+								>
+									<svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+								</button>
+							</div>
+						</div>
+					{/if}
+				</div>
+
+				<!-- Background / Fill color -->
+				<div class="relative">
+					<button
+						class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600 text-slate-400"
+						title="{isShape ? 'Fill' : 'Background'} color"
+						onclick={() => { activePickerTarget = activePickerTarget === 'bg' ? null : 'bg'; }}
+					>
+						<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<rect x="3" y="3" width="18" height="18" rx="2"/>
+						</svg>
+						<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{(cell ? (cell.bgColor ?? 'transparent') : tb ? (tb.bgColor ?? 'transparent') : (shape?.fillColor ?? 'transparent')) !== 'transparent' ? (cell ? (cell.bgColor ?? 'transparent') : tb ? (tb.bgColor ?? 'transparent') : (shape?.fillColor ?? 'transparent')) : '#64748b'}"></span>
+					</button>
+					{#if activePickerTarget === 'bg'}
+						{@const bgVal = cell ? (cell.bgColor ?? 'transparent') : tb ? (tb.bgColor ?? 'transparent') : (shape?.fillColor ?? 'transparent')}
+						<div class="absolute {pickerBelow ? 'top-full mt-2' : 'bottom-full mb-2'} right-0 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 w-[220px]" data-toolbar>
+							<p class="text-[10px] text-slate-400 uppercase tracking-wider mb-2">{isShape ? 'Fill' : 'Background'}</p>
+							<div class="grid grid-cols-7 gap-1.5">
+								<button
+									class="w-7 h-7 rounded-full border-2 border-slate-500 transition-transform hover:scale-110 {bgVal === 'transparent' ? 'ring-2 ring-indigo-400/50' : ''}"
+									style="background:repeating-conic-gradient(#475569 0% 25%, #334155 0% 50%) 50% / 8px 8px"
+									onclick={() => { toolbarSet(isTable ? 'bgColor' : isShape ? 'fillColor' : 'bgColor', 'transparent'); activePickerTarget = null; }}
+									title="None"
+								></button>
+								{#each presetColors as c}
+									<button
+										class="w-7 h-7 rounded-full border-2 transition-transform hover:scale-110 {(() => { if (cell) { return c === (cell.bgColor ?? 'transparent'); } if (tb) { const p = parseColorAndOpacity(tb.bgColor); return p.hex === c && p.opacity > 0; } return c === shape?.fillColor; })() ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-600'}"
+										style="background:{c}"
+										onclick={() => {
+											if (cell) { toolbarSet('bgColor', c); activePickerTarget = null; }
+											else if (tb) { const p = parseColorAndOpacity(tb.bgColor); applyBgColorWithOpacity(c, p.opacity || 1); }
+											else { toolbarSet('fillColor', c); activePickerTarget = null; }
+										}}
+									></button>
+								{/each}
+								<button
+									class="w-7 h-7 rounded-full border-2 border-dashed border-slate-500 hover:border-slate-300 flex items-center justify-center transition-colors"
+									title="Custom color"
+									onclick={() => {
+										const input = document.createElement('input');
+										input.type = 'color';
+										if (cell) { input.value = (cell.bgColor && cell.bgColor !== 'transparent') ? cell.bgColor : '#0f172a'; input.oninput = () => { toolbarSet('bgColor', input.value); }; }
+										else if (tb) { const p = parseColorAndOpacity(tb.bgColor); input.value = p.hex; input.oninput = () => { applyBgColorWithOpacity(input.value, p.opacity || 1); }; }
+										else { input.value = (shape?.fillColor !== 'transparent' ? shape?.fillColor : '#0f172a') ?? '#0f172a'; input.oninput = () => { toolbarSet('fillColor', input.value); }; }
+										input.click();
+									}}
+								>
+									<svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+								</button>
+							</div>
+							{#if tb}
+								{@const bgParsed = parseColorAndOpacity(tb.bgColor)}
+								<div class="mt-3 flex items-center gap-2">
+									<span class="text-[10px] text-slate-400 shrink-0">Opacity</span>
+									<input
+										type="range" min="0" max="100" step="1"
+										value={Math.round(bgParsed.opacity * 100)}
+										class="flex-1 h-1.5 accent-indigo-500 bg-slate-600 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-indigo-500"
+										oninput={(e) => {
+											const val = parseInt((e.target as HTMLInputElement).value) / 100;
+											const hex = bgParsed.hex === '#000000' && (!tb.bgColor || tb.bgColor === 'transparent') ? '#0f172a' : bgParsed.hex;
+											applyBgColorWithOpacity(hex, val);
+										}}
+									/>
+									<span class="text-[10px] text-slate-300 w-7 text-right">{Math.round(bgParsed.opacity * 100)}%</span>
+								</div>
+							{/if}
+						</div>
+					{/if}
+				</div>
+
+				<!-- Stroke (shape only) -->
+				{#if isShape && shape}
+					<div class="w-px h-7 bg-slate-600 mx-1"></div>
+					<div class="relative">
 						<button
-							class="w-7 h-7 rounded-lg border-2 border-slate-500 transition-transform hover:scale-110"
-							style="background:repeating-conic-gradient(#475569 0% 25%, #334155 0% 50%) 50% / 8px 8px"
-							onclick={() => { updateTextboxStyle('bgColor', 'transparent'); colorPickerTarget = null; }}
-							title="None"
-						></button>
-						{#each presetColors as c}
-							<button
-								class="w-7 h-7 rounded-lg border-2 transition-transform hover:scale-110 {c === (tb.bgColor ?? 'transparent') ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-500'}"
-								style="background:{c}"
-								onclick={() => { updateTextboxStyle('bgColor', c); colorPickerTarget = null; }}
-							></button>
-						{/each}
+							class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600 text-slate-400"
+							title="Stroke"
+							onclick={() => { activePickerTarget = activePickerTarget === 'stroke' ? null : 'stroke'; }}
+						>
+							<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="4 2"/></svg>
+							<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{shape.borderColor}"></span>
+						</button>
+						{#if activePickerTarget === 'stroke'}
+							<div class="absolute {pickerBelow ? 'top-full mt-2' : 'bottom-full mb-2'} right-0 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 w-[220px]" data-toolbar>
+								<p class="text-[10px] text-slate-400 uppercase tracking-wider mb-2">Stroke</p>
+								<div class="grid grid-cols-7 gap-1.5">
+									{#each presetColors as c}
+										<button
+											class="w-7 h-7 rounded-full border-2 transition-transform hover:scale-110 {c === shape.borderColor ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-600'}"
+											style="background:{c}"
+											onclick={() => { updateShapeStyle('borderColor', c); }}
+										></button>
+									{/each}
+									<button
+										class="w-7 h-7 rounded-full border-2 border-dashed border-slate-500 hover:border-slate-300 flex items-center justify-center transition-colors"
+										title="Custom color"
+										onclick={() => {
+											const input = document.createElement('input');
+											input.type = 'color';
+											input.value = shape.borderColor;
+											input.oninput = () => { updateShapeStyle('borderColor', input.value); };
+											input.click();
+										}}
+									>
+										<svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+									</button>
+								</div>
+								<div class="mt-3 flex items-center gap-2">
+									<span class="text-[10px] text-slate-400 shrink-0">Thickness</span>
+									<input
+										type="range" min="0" max="10" step="1"
+										value={shape.borderWidth}
+										class="flex-1 h-1.5 accent-indigo-500 bg-slate-600 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-indigo-500"
+										oninput={(e) => { updateShapeStyle('borderWidth', parseInt((e.target as HTMLInputElement).value)); }}
+									/>
+									<span class="text-[10px] text-slate-300 w-5 text-right">{shape.borderWidth}px</span>
+								</div>
+							</div>
+						{/if}
 					</div>
 				{/if}
+
+				<div class="w-px h-7 bg-slate-600 mx-1"></div>
+
+				<!-- Layer ordering -->
+				<div class="relative">
+					<button
+						class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600 text-slate-400"
+						title="Layer order"
+						onclick={() => { activePickerTarget = activePickerTarget === 'layers' ? null : 'layers'; }}
+					>
+						<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+							<path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+						</svg>
+					</button>
+					{#if activePickerTarget === 'layers'}
+						<div class="absolute {pickerBelow ? 'top-full mt-2' : 'bottom-full mb-2'} right-0 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 py-1 flex flex-col" data-toolbar>
+							<button class="px-4 py-1.5 text-left text-sm text-slate-300 hover:bg-slate-700 hover:text-white transition-colors whitespace-nowrap" onclick={() => { moveLayer('front'); activePickerTarget = null; }}>Bring to Front</button>
+							<button class="px-4 py-1.5 text-left text-sm text-slate-300 hover:bg-slate-700 hover:text-white transition-colors whitespace-nowrap" onclick={() => { moveLayer('forward'); activePickerTarget = null; }}>Bring Forward</button>
+							<button class="px-4 py-1.5 text-left text-sm text-slate-300 hover:bg-slate-700 hover:text-white transition-colors whitespace-nowrap" onclick={() => { moveLayer('backward'); activePickerTarget = null; }}>Send Backward</button>
+							<button class="px-4 py-1.5 text-left text-sm text-slate-300 hover:bg-slate-700 hover:text-white transition-colors whitespace-nowrap" onclick={() => { moveLayer('back'); activePickerTarget = null; }}>Send to Back</button>
+						</div>
+					{/if}
+				</div>
 			</div>
 		</div>
 	{/if}
@@ -1882,130 +2778,8 @@
 		</div>
 	{/if}
 
-	<!-- Floating Shape Toolbar -->
-	{#if selectedShapeId != null && shapeToolbarAnchorRect && getSelectedShape()}
-		{@const shape = getSelectedShape()!}
-		<div
-			class="fixed z-[150] flex items-center gap-1.5 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 shadow-xl whitespace-nowrap"
-			data-shape-toolbar
-			style="top:{shapeToolbarAnchorRect.top - 60}px;left:{shapeToolbarAnchorRect.left + shapeToolbarAnchorRect.width / 2}px;transform:translateX(-50%)"
-			onclick={(e) => e.stopPropagation()}
-			onmousedown={(e) => e.preventDefault()}
-		>
-			<!-- Fill color -->
-			<div class="relative">
-				<button
-					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600"
-					title="Fill color"
-					onclick={() => { shapeColorPickerTarget = shapeColorPickerTarget === 'fill' ? null : 'fill'; }}
-				>
-					<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
-					<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{shape.fillColor !== 'transparent' ? shape.fillColor : '#64748b'}"></span>
-				</button>
-				{#if shapeColorPickerTarget === 'fill'}
-					<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 grid grid-cols-6 gap-2" data-shape-toolbar>
-						<button
-							class="w-7 h-7 rounded-lg border-2 border-slate-500 transition-transform hover:scale-110"
-							style="background:repeating-conic-gradient(#475569 0% 25%, #334155 0% 50%) 50% / 8px 8px"
-							onclick={() => { updateShapeStyle('fillColor', 'transparent'); shapeColorPickerTarget = null; }}
-							title="None"
-						></button>
-						{#each presetColors as c}
-							<button
-								class="w-7 h-7 rounded-lg border-2 transition-transform hover:scale-110 {c === shape.fillColor ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-500'}"
-								style="background:{c}"
-								onclick={() => { updateShapeStyle('fillColor', c); shapeColorPickerTarget = null; }}
-							></button>
-						{/each}
-					</div>
-				{/if}
-			</div>
 
-			<!-- Border color -->
-			<div class="relative">
-				<button
-					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors hover:bg-slate-600"
-					title="Border color"
-					onclick={() => { shapeColorPickerTarget = shapeColorPickerTarget === 'border' ? null : 'border'; }}
-				>
-					<svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="4 2"/></svg>
-					<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{shape.borderColor}"></span>
-				</button>
-				{#if shapeColorPickerTarget === 'border'}
-					<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 grid grid-cols-6 gap-2" data-shape-toolbar>
-						{#each presetColors as c}
-							<button
-								class="w-7 h-7 rounded-lg border-2 transition-transform hover:scale-110 {c === shape.borderColor ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-500'}"
-								style="background:{c}"
-								onclick={() => { updateShapeStyle('borderColor', c); shapeColorPickerTarget = null; }}
-							></button>
-						{/each}
-					</div>
-				{/if}
-			</div>
 
-			<div class="w-px h-7 bg-slate-600 mx-1"></div>
-
-			<!-- Border width -->
-			<div class="flex items-center gap-0.5">
-				<button
-					class="px-2 py-1 rounded text-xs transition-colors {shape.borderWidth === 1 ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
-					onclick={() => updateShapeStyle('borderWidth', 1)}
-					title="Thin border"
-				>Thin</button>
-				<button
-					class="px-2 py-1 rounded text-xs transition-colors {shape.borderWidth === 2 ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
-					onclick={() => updateShapeStyle('borderWidth', 2)}
-					title="Medium border"
-				>Med</button>
-				<button
-					class="px-2 py-1 rounded text-xs transition-colors {shape.borderWidth === 4 ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white hover:bg-slate-600'}"
-					onclick={() => updateShapeStyle('borderWidth', 4)}
-					title="Thick border"
-				>Thick</button>
-			</div>
-
-			<div class="w-px h-7 bg-slate-600 mx-1"></div>
-
-			<!-- Text color -->
-			<div class="relative">
-				<button
-					class="w-8 h-8 flex items-center justify-center rounded-lg transition-colors text-sm font-bold hover:bg-slate-600"
-					style="color:{shape.textColor}"
-					title="Text color"
-					onclick={() => { shapeColorPickerTarget = shapeColorPickerTarget === 'text' ? null : 'text'; }}
-				>A
-					<span class="absolute bottom-0.5 left-1.5 right-1.5 h-1 rounded-full" style="background:{shape.textColor}"></span>
-				</button>
-				{#if shapeColorPickerTarget === 'text'}
-					<div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 p-3 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl z-50 grid grid-cols-6 gap-2" data-shape-toolbar>
-						{#each presetColors as c}
-							<button
-								class="w-7 h-7 rounded-lg border-2 transition-transform hover:scale-110 {c === shape.textColor ? 'border-indigo-400 ring-2 ring-indigo-400/50' : 'border-slate-500'}"
-								style="background:{c}"
-								onclick={() => { updateShapeStyle('textColor', c); shapeColorPickerTarget = null; }}
-							></button>
-						{/each}
-					</div>
-				{/if}
-			</div>
-
-			<!-- Font size -->
-			<div class="flex items-center gap-1 ml-1">
-				<button
-					class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-600 text-sm"
-					onclick={() => updateShapeStyle('fontSize', Math.max(8, shape.fontSize - 2))}
-					title="Decrease font size"
-				>&minus;</button>
-				<span class="text-sm text-slate-300 w-7 text-center">{shape.fontSize}</span>
-				<button
-					class="w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-slate-600 text-sm"
-					onclick={() => updateShapeStyle('fontSize', Math.min(72, shape.fontSize + 2))}
-					title="Increase font size"
-				>+</button>
-			</div>
-		</div>
-	{/if}
 
 	<!-- Camera Modal -->
 	{#if showCameraModal}
