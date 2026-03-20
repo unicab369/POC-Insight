@@ -8,6 +8,7 @@
 		width: number;
 		height: number;
 		text: string;
+		role?: 'title' | 'subtitle';
 		fontFamily?: string;
 		fontSize?: number;
 		bold?: boolean;
@@ -100,9 +101,16 @@
 	let nextShapeId = $state(saved?.nextShapeId ?? 1);
 	let nextTableId = $state(saved?.nextTableId ?? 1);
 	let slides = $state<Slide[]>(
-		saved?.slides ?? [
-			{ id: 1, title: 'Welcome to the Presentation', description: 'Click to edit this description', isLanding: true, images: [], textboxes: [], shapes: [], tables: [] }
-		]
+		saved?.slides ?? (() => {
+			const tb1Id = nextTextboxId++;
+			const tb2Id = nextTextboxId++;
+			return [
+				{ id: 1, title: 'Welcome to the Presentation', description: 'Click to edit this description', isLanding: true, images: [], textboxes: [
+					{ id: tb1Id, x: 10, y: 35, width: 80, height: 12, text: 'Welcome to the Presentation', role: 'title' as const, fontSize: 36, bold: true, align: 'center' as const, textColor: '#ffffff' },
+					{ id: tb2Id, x: 15, y: 52, width: 70, height: 12, text: 'Click to edit this description', role: 'subtitle' as const, fontSize: 16, align: 'center' as const, textColor: '#94a3b8' }
+				], shapes: [], tables: [] }
+			];
+		})()
 	);
 	let selectedSlideId = $state(saved?.selectedSlideId ?? 1);
 
@@ -110,6 +118,20 @@
 	for (const s of slides) {
 		if (!s.shapes) s.shapes = [];
 		if (!s.tables) s.tables = [];
+		// Migrate: create title/subtitle textboxes from old title/description strings
+		if (!s.textboxes.some(t => t.role === 'title')) {
+			if (s.isLanding) {
+				s.textboxes.unshift(
+					{ id: nextTextboxId++, x: 10, y: 35, width: 80, height: 12, text: s.title || 'Untitled', role: 'title', fontSize: 36, bold: true, align: 'center', textColor: '#ffffff' },
+					{ id: nextTextboxId++, x: 15, y: 52, width: 70, height: 12, text: s.description || '', role: 'subtitle', fontSize: 16, align: 'center', textColor: '#94a3b8' }
+				);
+			} else {
+				s.textboxes.unshift(
+					{ id: nextTextboxId++, x: 5, y: 5, width: 55, height: 10, text: s.title || 'Untitled', role: 'title', fontSize: 24, bold: true, textColor: '#ffffff' },
+					{ id: nextTextboxId++, x: 5, y: 18, width: 65, height: 15, text: s.description || '', role: 'subtitle', fontSize: 14, textColor: '#94a3b8' }
+				);
+			}
+		}
 	}
 
 	$effect(() => {
@@ -124,8 +146,6 @@
 		};
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 	});
-	let editingField = $state<'title' | 'description' | null>(null);
-
 	// Image selection state
 	let selectedImageId = $state<number | null>(null);
 	let activeImageId = $state<number | null>(null);
@@ -160,6 +180,11 @@
 	let cellSelectionEndCol = $state<number | null>(null);
 	let isDraggingCellSelection = $state(false);
 	let tableToolbarAnchorRect = $state<{top: number; left: number; width: number} | null>(null);
+
+	// Slide drag-reorder state
+	let dragSlideId = $state<number | null>(null);
+	let dragOverSlideId = $state<number | null>(null);
+	let dragOverPosition = $state<'above' | 'below' | null>(null);
 
 	// Drawing state
 	let isDrawing = $state(false);
@@ -258,6 +283,48 @@
 
 		el.addEventListener('pointermove', onMove);
 		el.addEventListener('pointerup', onUp);
+	}
+
+	// Move table via handle (used when table is in edit mode)
+	function startTableMoveFromHandle(tableId: number, e: PointerEvent) {
+		if (!slideCanvasEl || !selectedSlide) return;
+		const table = selectedSlide.tables.find(t => t.id === tableId);
+		if (!table) return;
+		e.preventDefault();
+		e.stopPropagation();
+
+		const rect = slideCanvasEl.getBoundingClientRect();
+		const mx = ((e.clientX - rect.left) / rect.width) * 100;
+		const my = ((e.clientY - rect.top) / rect.height) * 100;
+		const offX = mx - table.x;
+		const offY = my - table.y;
+		let dragging = false;
+		const startX = e.clientX, startY = e.clientY;
+		if (canvasWrapperEl) canvasWrapperEl.style.overflow = 'hidden';
+
+		const onMove = (ev: PointerEvent) => {
+			if (!dragging) {
+				if (Math.abs(ev.clientX - startX) < 3 && Math.abs(ev.clientY - startY) < 3) return;
+				dragging = true;
+				saveHistory();
+			}
+			if (!slideCanvasEl || !selectedSlide) return;
+			const t = selectedSlide.tables.find(t => t.id === tableId);
+			if (!t) return;
+			const r = slideCanvasEl.getBoundingClientRect();
+			const cx = ((ev.clientX - r.left) / r.width) * 100;
+			const cy = ((ev.clientY - r.top) / r.height) * 100;
+			t.x = Math.max(0, Math.min(100 - t.width, cx - offX));
+			t.y = Math.max(0, Math.min(100 - t.height, cy - offY));
+			refreshTableToolbarPosition();
+		};
+		const onUp = () => {
+			document.removeEventListener('pointermove', onMove);
+			document.removeEventListener('pointerup', onUp);
+			if (canvasWrapperEl) canvasWrapperEl.style.overflow = '';
+		};
+		document.addEventListener('pointermove', onMove);
+		document.addEventListener('pointerup', onUp);
 	}
 
 	// Textbox resizing — uses pointer capture for reliable drag
@@ -563,7 +630,7 @@
 		});
 		slides = entry.slides;
 		selectedSlideId = entry.selectedSlideId;
-		editingField = null;
+
 		selectedTextboxId = null;
 		editingTextboxId = null;
 		showFormattingToolbar = false;
@@ -590,7 +657,7 @@
 		});
 		slides = entry.slides;
 		selectedSlideId = entry.selectedSlideId;
-		editingField = null;
+
 		selectedTextboxId = null;
 		editingTextboxId = null;
 		showFormattingToolbar = false;
@@ -611,13 +678,18 @@
 	function addSlide() {
 		saveHistory();
 		const id = nextId++;
+		const tb1Id = nextTextboxId++;
+		const tb2Id = nextTextboxId++;
 		slides.push({
 			id,
 			title: `Slide ${slides.length + 1}`,
 			description: 'Click to edit this description',
 			isLanding: false,
 			images: [],
-			textboxes: [],
+			textboxes: [
+				{ id: tb1Id, x: 5, y: 5, width: 55, height: 10, text: `Slide ${slides.length + 1}`, role: 'title', fontSize: 24, bold: true, textColor: '#ffffff' },
+				{ id: tb2Id, x: 5, y: 18, width: 65, height: 15, text: 'Click to edit this description', role: 'subtitle', fontSize: 14, textColor: '#94a3b8' }
+			],
 			shapes: [],
 			tables: []
 		});
@@ -634,31 +706,86 @@
 		}
 	}
 
-	function startEditing(field: 'title' | 'description') {
-		if (activeTool) return;
-		editingField = field;
-		selectedTextboxId = null;
-		editingTextboxId = null;
-		selectedImageId = null;
-		activeImageId = null;
-		selectedShapeId = null;
-		editingShapeId = null;
-		selectedTableId = null;
-		editingTableId = null;
-		selectedCellRow = null;
-		selectedCellCol = null;
-		cellSelectionEndRow = null;
-		cellSelectionEndCol = null;
+	function moveSlide(id: number, direction: -1 | 1) {
+		const index = slides.findIndex((s) => s.id === id);
+		const target = index + direction;
+		if (index === -1 || target < 0 || target >= slides.length) return;
+		saveHistory();
+		const [moved] = slides.splice(index, 1);
+		slides.splice(target, 0, moved);
 	}
 
-	function stopEditing() {
-		editingField = null;
-	}
+	function slideDragAction(node: HTMLElement, slideId: number) {
+		let sid = slideId;
 
-	function handleKeydown(e: KeyboardEvent) {
-		if (e.key === 'Enter' || e.key === 'Escape') {
-			stopEditing();
-		}
+		const onPointerDown = (e: PointerEvent) => {
+			// Don't drag from child buttons (reorder / delete)
+			if ((e.target as HTMLElement).closest('[data-slide-btn]')) return;
+			if (e.button !== 0) return;
+
+			const startY = e.clientY;
+			const startX = e.clientX;
+			let dragging = false;
+
+			const onPointerMove = (ev: PointerEvent) => {
+				if (!dragging) {
+					if (Math.abs(ev.clientY - startY) < 5 && Math.abs(ev.clientX - startX) < 5) return;
+					dragging = true;
+					dragSlideId = sid;
+					// Prevent text selection while dragging
+					document.body.style.userSelect = 'none';
+				}
+				// Find which thumbnail we're over
+				const els = document.querySelectorAll('[data-slide-thumb]');
+				let foundOver = false;
+				for (const el of els) {
+					const rect = el.getBoundingClientRect();
+					if (ev.clientY >= rect.top && ev.clientY <= rect.bottom &&
+						ev.clientX >= rect.left && ev.clientX <= rect.right) {
+						const thumbId = Number(el.getAttribute('data-slide-thumb'));
+						if (thumbId !== dragSlideId) {
+							dragOverSlideId = thumbId;
+							dragOverPosition = ev.clientY < rect.top + rect.height / 2 ? 'above' : 'below';
+							foundOver = true;
+						}
+						break;
+					}
+				}
+				if (!foundOver) {
+					dragOverSlideId = null;
+					dragOverPosition = null;
+				}
+			};
+
+			const onPointerUp = () => {
+				document.removeEventListener('pointermove', onPointerMove);
+				document.removeEventListener('pointerup', onPointerUp);
+				document.body.style.userSelect = '';
+				if (dragging && dragSlideId != null && dragOverSlideId != null) {
+					const fromIdx = slides.findIndex(s => s.id === dragSlideId);
+					let toIdx = slides.findIndex(s => s.id === dragOverSlideId);
+					if (fromIdx !== -1 && toIdx !== -1 && fromIdx !== toIdx) {
+						saveHistory();
+						const [moved] = slides.splice(fromIdx, 1);
+						toIdx = slides.findIndex(s => s.id === dragOverSlideId);
+						if (dragOverPosition === 'below') toIdx++;
+						slides.splice(toIdx, 0, moved);
+					}
+				}
+				dragSlideId = null;
+				dragOverSlideId = null;
+				dragOverPosition = null;
+			};
+
+			document.addEventListener('pointermove', onPointerMove);
+			document.addEventListener('pointerup', onPointerUp);
+		};
+
+		node.addEventListener('pointerdown', onPointerDown);
+		return {
+			update(newId: number) { sid = newId; },
+			destroy() { node.removeEventListener('pointerdown', onPointerDown); }
+		};
 	}
 
 	function fillImage(imageId: number, src: string, name: string) {
@@ -747,7 +874,7 @@
 			editingTextboxId = null;
 			selectedImageId = null;
 			activeImageId = null;
-			editingField = null;
+	
 			selectedTableId = null;
 			editingTableId = null;
 			selectedCellRow = null;
@@ -766,7 +893,7 @@
 			editingTextboxId = null;
 			selectedImageId = null;
 			activeImageId = null;
-			editingField = null;
+	
 			selectedTableId = null;
 			editingTableId = null;
 			selectedCellRow = null;
@@ -876,7 +1003,7 @@
 		if (activeTool) return;
 		selectedTextboxId = id;
 		activePickerTarget = null;
-		editingField = null;
+
 		selectedImageId = null;
 		activeImageId = null;
 		imageToolbarAnchorRect = null;
@@ -902,7 +1029,7 @@
 		showFormattingToolbar = false;
 		activePickerTarget = null;
 		toolbarAnchorRect = null;
-		editingField = null;
+
 		selectedShapeId = null;
 		editingShapeId = null;
 		shapeToolbarAnchorRect = null;
@@ -924,7 +1051,7 @@
 		if (activeTool) return;
 		selectedTextboxId = id;
 		editingTextboxId = id;
-		editingField = null;
+
 		showFormattingToolbar = true;
 		activePickerTarget = null;
 	}
@@ -957,7 +1084,7 @@
 		activeImageId = null;
 		selectedShapeId = null;
 		editingShapeId = null;
-		editingField = null;
+
 		selectedTableId = null;
 		editingTableId = null;
 		selectedCellRow = null;
@@ -979,7 +1106,7 @@
 		selectedImageId = null;
 		activeImageId = null;
 		imageToolbarAnchorRect = null;
-		editingField = null;
+
 		selectedTableId = null;
 		editingTableId = null;
 		selectedCellRow = null;
@@ -995,7 +1122,7 @@
 		selectedShapeId = id;
 		editingShapeId = id;
 		activePickerTarget = null;
-		editingField = null;
+
 	}
 
 	function deleteShape(id: number) {
@@ -1161,7 +1288,7 @@
 		selectedShapeId = null;
 		editingShapeId = null;
 		shapeToolbarAnchorRect = null;
-		editingField = null;
+
 	}
 
 	function startEditingTable(id: number, e: MouseEvent | PointerEvent) {
@@ -1170,7 +1297,7 @@
 		selectedTableId = id;
 		editingTableId = id;
 		activePickerTarget = null;
-		editingField = null;
+
 	}
 
 	function selectCell(row: number, col: number) {
@@ -1327,6 +1454,116 @@
 		};
 	}
 
+	// Native pointerdown handler for table interaction.
+	// Must be a native listener (not Svelte onpointerdown) so that
+	// preventDefault/stopPropagation fire at the element level, before
+	// Svelte 5's root-level event delegation processes the event.
+	function tablePointerAction(node: HTMLElement, tableId: number) {
+		let tid = tableId;
+
+		const findCell = (clientX: number, clientY: number) => {
+			const tdEl = document.elementFromPoint(clientX, clientY)?.closest('td');
+			const tblEl = tdEl?.closest('table');
+			if (!tdEl || !tblEl || !node.contains(tblEl)) return null;
+			const tr = tdEl.parentElement;
+			if (!tr) return null;
+			const rows = Array.from(tblEl.querySelectorAll(':scope > tr, :scope > tbody > tr'));
+			const ri = rows.indexOf(tr as HTMLTableRowElement);
+			const ci = Array.from(tr.children).indexOf(tdEl);
+			return (ri >= 0 && ci >= 0) ? { ri, ci, tblEl } : null;
+		};
+
+		const startCellDrag = (tblEl: Element, e: PointerEvent) => {
+			isDraggingCellSelection = true;
+			node.setPointerCapture(e.pointerId);
+			const onMove = (ev: PointerEvent) => {
+				const el = document.elementFromPoint(ev.clientX, ev.clientY);
+				const tdTarget = el?.closest('td');
+				if (!tdTarget || !tblEl.contains(tdTarget)) return;
+				const tr2 = tdTarget.parentElement;
+				if (!tr2) return;
+				const rows2 = Array.from(tblEl.querySelectorAll(':scope > tr, :scope > tbody > tr'));
+				const rowIdx = rows2.indexOf(tr2 as HTMLTableRowElement);
+				const colIdx = Array.from(tr2.children).indexOf(tdTarget);
+				if (rowIdx >= 0 && colIdx >= 0 && (rowIdx !== cellSelectionEndRow || colIdx !== cellSelectionEndCol)) {
+					cellSelectionEndRow = rowIdx;
+					cellSelectionEndCol = colIdx;
+				}
+			};
+			const onUp = (ev: PointerEvent) => {
+				isDraggingCellSelection = false;
+				if (node.hasPointerCapture(ev.pointerId)) node.releasePointerCapture(ev.pointerId);
+				node.removeEventListener('pointermove', onMove);
+				node.removeEventListener('pointerup', onUp);
+			};
+			node.addEventListener('pointermove', onMove);
+			node.addEventListener('pointerup', onUp);
+		};
+
+		const handler = (e: PointerEvent) => {
+			if (activeTool) return;
+
+			// Let the move handle handle its own pointer events
+			if ((e.target as HTMLElement).closest('[data-table-move-handle]')) return;
+
+			// In edit mode → cell selection + drag
+			if (editingTableId === tid) {
+				e.preventDefault();
+				e.stopPropagation();
+				const hit = findCell(e.clientX, e.clientY);
+				if (hit) {
+					selectedCellRow = hit.ri;
+					selectedCellCol = hit.ci;
+					cellSelectionEndRow = hit.ri;
+					cellSelectionEndCol = hit.ci;
+					startCellDrag(hit.tblEl, e);
+				}
+				skipNextDeselect = true;
+				return;
+			}
+
+			// Selected but not editing → enter edit mode + select cell + drag
+			if (selectedTableId === tid) {
+				e.preventDefault();
+				e.stopPropagation();
+				editingTableId = tid;
+				const hit = findCell(e.clientX, e.clientY);
+				if (hit) {
+					selectedCellRow = hit.ri;
+					selectedCellCol = hit.ci;
+					cellSelectionEndRow = hit.ri;
+					cellSelectionEndCol = hit.ci;
+					startCellDrag(hit.tblEl, e);
+				}
+				skipNextDeselect = true;
+				return;
+			}
+
+			// Not selected → select table + drag to move
+			e.preventDefault();
+			selectTable(tid, e);
+			startElementDragPointer('table', tid, e);
+		};
+
+		// Capture-phase listener: prevent textarea from starting native text
+		// selection drag, which would steal pointer events from cell drag.
+		const captureHandler = (e: PointerEvent) => {
+			if (editingTableId === tid && e.target instanceof HTMLTextAreaElement) {
+				e.preventDefault();
+			}
+		};
+
+		node.addEventListener('pointerdown', captureHandler, true);
+		node.addEventListener('pointerdown', handler);
+		return {
+			update(newId: number) { tid = newId; },
+			destroy() {
+				node.removeEventListener('pointerdown', captureHandler, true);
+				node.removeEventListener('pointerdown', handler);
+			}
+		};
+	}
+
 	$effect(() => {
 		if (selectedTableId == null) return;
 		const vv = window.visualViewport;
@@ -1410,9 +1647,6 @@
 <svelte:window
 	onclick={(e) => {
 		const target = e.target as HTMLElement;
-		if (!target.closest('[data-editable]') && !target.closest('[data-textbox]') && !target.closest('[data-image]') && !target.closest('[data-shape]') && !target.closest('[data-table]')) {
-			stopEditing();
-		}
 		if (activePickerTarget && !target.closest('[data-toolbar]')) {
 			activePickerTarget = null;
 		}
@@ -1438,7 +1672,6 @@
 			if (editingTextboxId) { editingTextboxId = null; showFormattingToolbar = false; return; }
 			if (selectedTextboxId) { selectedTextboxId = null; return; }
 			if (activeTool) { activeTool = null; selectedShapeType = null; return; }
-			if (editingField) { stopEditing(); return; }
 			close();
 		}
 		if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
@@ -1663,11 +1896,14 @@
 
 		<div class="flex-1 overflow-y-auto p-3 space-y-3">
 			{#each slides as slide, i}
-				<button
-					class="w-full group relative"
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div
+					data-slide-thumb={slide.id}
+					class="w-full group relative cursor-pointer touch-none {dragSlideId === slide.id ? 'opacity-40' : ''}"
+					use:slideDragAction={slide.id}
 					onclick={() => {
 						selectedSlideId = slide.id;
-						editingField = null;
+
 						selectedTextboxId = null;
 						editingTextboxId = null;
 						selectedImageId = null;
@@ -1682,6 +1918,12 @@
 						cellSelectionEndCol = null;
 					}}
 				>
+				{#if dragOverSlideId === slide.id && dragOverPosition === 'above'}
+					<div class="absolute -top-1.5 left-0 right-0 h-0.5 bg-indigo-500 rounded-full z-20"></div>
+				{/if}
+				{#if dragOverSlideId === slide.id && dragOverPosition === 'below'}
+					<div class="absolute -bottom-1.5 left-0 right-0 h-0.5 bg-indigo-500 rounded-full z-20"></div>
+				{/if}
 					<!-- Slide number badge -->
 					<span class="absolute -top-1.5 -left-1 z-10 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold {selectedSlideId === slide.id
 						? 'bg-indigo-500 text-white'
@@ -1697,25 +1939,7 @@
 							: 'border-slate-700 hover:border-slate-600'}"
 					>
 						<div class="w-full h-full bg-slate-900 relative overflow-hidden">
-							<!-- Title & description -->
-							{#if slide.isLanding}
-								<div class="absolute inset-0 flex items-center justify-center p-2">
-									<div class="text-center overflow-hidden">
-										<p class="text-[7px] font-bold text-white leading-tight truncate">{slide.title}</p>
-										{#if slide.description}
-											<p class="text-[5px] text-slate-400 mt-0.5 leading-tight line-clamp-2">{slide.description}</p>
-										{/if}
-									</div>
-								</div>
-							{:else}
-								<div class="p-2 overflow-hidden">
-									<p class="text-[6px] font-bold text-white leading-tight truncate">{slide.title}</p>
-									{#if slide.description}
-										<p class="text-[4px] text-slate-400 mt-0.5 leading-tight line-clamp-2">{slide.description}</p>
-									{/if}
-								</div>
-							{/if}
-							<!-- Textboxes -->
+							<!-- Textboxes (including title/subtitle) -->
 							{#each slide.textboxes as tb}
 								<div
 									class="absolute overflow-hidden"
@@ -1789,6 +2013,7 @@
 					<!-- Delete button -->
 					{#if !slide.isLanding}
 						<button
+							data-slide-btn
 							class="absolute -top-1.5 -right-1 z-10 w-5 h-5 rounded-full bg-slate-700 flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-red-500 text-slate-400 hover:text-white transition-all"
 							onclick={(e) => {
 								e.stopPropagation();
@@ -1801,7 +2026,29 @@
 							</svg>
 						</button>
 					{/if}
-				</button>
+
+					<!-- Reorder buttons -->
+					{#if selectedSlideId === slide.id && slides.length > 1}
+						<div data-slide-btn class="absolute -right-2 top-1/2 -translate-y-1/2 z-10 flex flex-col gap-1">
+							<button
+								class="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center transition-all {i > 0 ? 'text-indigo-300 hover:bg-indigo-500 hover:text-white' : 'opacity-30 text-slate-500 cursor-default'}"
+								onclick={(e) => { e.stopPropagation(); moveSlide(slide.id, -1); }}
+								aria-label="Move slide up"
+								disabled={i === 0}
+							>
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6" /></svg>
+							</button>
+							<button
+								class="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center transition-all {i < slides.length - 1 ? 'text-indigo-300 hover:bg-indigo-500 hover:text-white' : 'opacity-30 text-slate-500 cursor-default'}"
+								onclick={(e) => { e.stopPropagation(); moveSlide(slide.id, 1); }}
+								aria-label="Move slide down"
+								disabled={i === slides.length - 1}
+							>
+								<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
+							</button>
+						</div>
+					{/if}
+				</div>
 			{/each}
 		</div>
 
@@ -1831,122 +2078,12 @@
 				onmousedown={handleCanvasMousedown}
 				onclick={(e) => {
 					const t = e.target as HTMLElement;
-					if (!t.closest('[data-textbox]') && !t.closest('[data-editable]') && !t.closest('[data-image]') && !t.closest('[data-shape]') && !t.closest('[data-table]')) {
+					if (!t.isConnected) return;
+					if (!t.closest('[data-textbox]') && !t.closest('[data-image]') && !t.closest('[data-shape]') && !t.closest('[data-table]')) {
 						deselectAll();
 					}
 				}}
 			>
-				<!-- Slide title/description -->
-				{#if selectedSlide.isLanding}
-					<div class="flex items-center justify-center h-full p-12 pointer-events-none">
-						<div class="text-center max-w-3xl w-full space-y-6 pointer-events-auto">
-							{#if editingField === 'title'}
-								<div data-editable>
-									<input
-										type="text"
-										bind:value={selectedSlide.title}
-										onblur={stopEditing}
-										onkeydown={handleKeydown}
-										class="w-full bg-slate-800 border border-indigo-500/50 rounded-lg px-6 py-4 text-4xl font-bold text-white text-center focus:outline-none focus:border-indigo-500"
-										autofocus
-									/>
-								</div>
-							{:else}
-								<h1
-									data-editable
-									class="text-4xl font-bold text-white cursor-pointer hover:text-indigo-300 transition-colors rounded-lg px-6 py-3"
-									role="button"
-									tabindex="0"
-									onclick={() => startEditing('title')}
-									onkeydown={(e) => e.key === 'Enter' && startEditing('title')}
-								>
-									{selectedSlide.title}
-								</h1>
-							{/if}
-
-							{#if editingField === 'description'}
-								<div data-editable>
-									<textarea
-										bind:value={selectedSlide.description}
-										onblur={stopEditing}
-										onkeydown={(e) => e.key === 'Escape' && stopEditing()}
-										class="w-full bg-slate-800 border border-indigo-500/50 rounded-lg px-6 py-3 text-lg text-slate-300 text-center focus:outline-none focus:border-indigo-500 resize-none"
-										rows="3"
-										autofocus
-									></textarea>
-								</div>
-							{:else}
-								<p
-									data-editable
-									class="text-lg text-slate-400 cursor-pointer hover:text-slate-200 transition-colors rounded-lg px-6 py-3"
-									role="button"
-									tabindex="0"
-									onclick={() => startEditing('description')}
-									onkeydown={(e) => e.key === 'Enter' && startEditing('description')}
-								>
-									{selectedSlide.description}
-								</p>
-							{/if}
-
-						</div>
-					</div>
-				{:else}
-					<div class="p-10 max-w-4xl pointer-events-none">
-						<div class="pointer-events-auto">
-							{#if editingField === 'title'}
-								<div data-editable>
-									<input
-										type="text"
-										bind:value={selectedSlide.title}
-										onblur={stopEditing}
-										onkeydown={handleKeydown}
-										class="w-full bg-slate-800 border border-indigo-500/50 rounded-lg px-5 py-3 text-2xl font-bold text-white focus:outline-none focus:border-indigo-500"
-										autofocus
-									/>
-								</div>
-							{:else}
-								<h2
-									data-editable
-									class="text-2xl font-bold text-white cursor-pointer hover:text-indigo-300 transition-colors rounded-lg px-5 py-3 -ml-5"
-									role="button"
-									tabindex="0"
-									onclick={() => startEditing('title')}
-									onkeydown={(e) => e.key === 'Enter' && startEditing('title')}
-								>
-									{selectedSlide.title}
-								</h2>
-							{/if}
-
-							<div class="mt-4">
-								{#if editingField === 'description'}
-									<div data-editable>
-										<textarea
-											bind:value={selectedSlide.description}
-											onblur={stopEditing}
-											onkeydown={(e) => e.key === 'Escape' && stopEditing()}
-											class="w-full bg-slate-800 border border-indigo-500/50 rounded-lg px-5 py-3 text-base text-slate-300 focus:outline-none focus:border-indigo-500 resize-none"
-											rows="6"
-											autofocus
-										></textarea>
-									</div>
-								{:else}
-									<p
-										data-editable
-										class="text-base text-slate-400 cursor-pointer hover:text-slate-200 transition-colors rounded-lg px-5 py-3 -ml-5"
-										role="button"
-										tabindex="0"
-										onclick={() => startEditing('description')}
-										onkeydown={(e) => e.key === 'Enter' && startEditing('description')}
-									>
-										{selectedSlide.description}
-									</p>
-								{/if}
-							</div>
-
-						</div>
-					</div>
-				{/if}
-
 				<!-- Textboxes layer -->
 				{#each selectedSlide.textboxes as tb (tb.id)}
 					<div
@@ -2237,61 +2374,7 @@
 						style="left:{table.x}%;top:{table.y}%;width:{table.width}%;height:{table.height}%"
 						role="button"
 						tabindex="0"
-						onpointerdown={(e) => {
-							if ((e.target as HTMLElement).tagName === 'TEXTAREA') return;
-							if (activeTool) return;
-							if (editingTableId === table.id) return;
-							if (selectedTableId === table.id) {
-								// Already selected → enter edit mode and select the clicked cell
-								e.preventDefault();
-								e.stopPropagation();
-								editingTableId = table.id;
-								const tdEl = document.elementFromPoint(e.clientX, e.clientY)?.closest('td');
-								const tblEl = tdEl?.closest('table');
-								if (tdEl && tblEl) {
-									const tr = tdEl.parentElement;
-									if (tr) {
-										const rows = Array.from(tblEl.querySelectorAll(':scope > tr, :scope > tbody > tr'));
-										const ri = rows.indexOf(tr as HTMLTableRowElement);
-										const ci = Array.from(tr.children).indexOf(tdEl);
-										if (ri >= 0 && ci >= 0) {
-											selectedCellRow = ri;
-											selectedCellCol = ci;
-											cellSelectionEndRow = ri;
-											cellSelectionEndCol = ci;
-										}
-									}
-								}
-								// Set up drag-to-select listeners so second click can also drag
-								isDraggingCellSelection = true;
-								const onMove = (ev: PointerEvent) => {
-									if (!tblEl) return;
-									const tdTarget = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('td');
-									if (!tdTarget || !tblEl.contains(tdTarget)) return;
-									const tr2 = tdTarget.parentElement;
-									if (!tr2) return;
-									const rows2 = Array.from(tblEl.querySelectorAll(':scope > tr, :scope > tbody > tr'));
-									const rowIdx = rows2.indexOf(tr2 as HTMLTableRowElement);
-									const colIdx = Array.from(tr2.children).indexOf(tdTarget);
-									if (rowIdx >= 0 && colIdx >= 0 && (rowIdx !== cellSelectionEndRow || colIdx !== cellSelectionEndCol)) {
-										cellSelectionEndRow = rowIdx;
-										cellSelectionEndCol = colIdx;
-									}
-								};
-								const onUp = () => {
-									isDraggingCellSelection = false;
-									window.removeEventListener('pointermove', onMove);
-									window.removeEventListener('pointerup', onUp);
-								};
-								window.addEventListener('pointermove', onMove);
-								window.addEventListener('pointerup', onUp);
-								skipNextDeselect = true;
-								return;
-							}
-							e.preventDefault();
-							selectTable(table.id, e);
-							startElementDragPointer('table', table.id, e);
-						}}
+						use:tablePointerAction={table.id}
 						onkeydown={(e) => e.key === 'Enter' && startEditingTable(table.id, new MouseEvent('click'))}
 					>
 						<!-- Toolbar position anchor -->
@@ -2309,38 +2392,6 @@
 										<td
 											class="relative {editingTableId === table.id ? 'border border-slate-500' : 'border border-slate-700/50'} {isCellInSelection(ri, ci) && editingTableId === table.id ? 'ring-2 ring-inset ring-indigo-500' : ''}"
 											style="background:{cell.bgColor ?? 'transparent'};vertical-align:top"
-											onpointerdown={(e) => {
-												if (editingTableId !== table.id) return;
-												e.stopPropagation();
-												e.preventDefault();
-												selectedCellRow = ri;
-												selectedCellCol = ci;
-												cellSelectionEndRow = ri;
-												cellSelectionEndCol = ci;
-												isDraggingCellSelection = true;
-												const tableEl = (e.currentTarget as HTMLElement).closest('table');
-												const onMove = (ev: PointerEvent) => {
-													if (!tableEl) return;
-													const tdTarget = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('td');
-													if (!tdTarget || !tableEl.contains(tdTarget)) return;
-													const tr2 = tdTarget.parentElement;
-													if (!tr2) return;
-													const rows2 = Array.from(tableEl.querySelectorAll(':scope > tr, :scope > tbody > tr'));
-													const rowIdx = rows2.indexOf(tr2 as HTMLTableRowElement);
-													const colIdx = Array.from(tr2.children).indexOf(tdTarget);
-													if (rowIdx >= 0 && colIdx >= 0 && (rowIdx !== cellSelectionEndRow || colIdx !== cellSelectionEndCol)) {
-														cellSelectionEndRow = rowIdx;
-														cellSelectionEndCol = colIdx;
-													}
-												};
-												const onUp = () => {
-													isDraggingCellSelection = false;
-													window.removeEventListener('pointermove', onMove);
-													window.removeEventListener('pointerup', onUp);
-												};
-												window.addEventListener('pointermove', onMove);
-												window.addEventListener('pointerup', onUp);
-											}}
 										>
 											{#if editingTableId === table.id && selectedCellRow === ri && selectedCellCol === ci && !isMultiCellSelection()}
 												<textarea
@@ -2406,6 +2457,18 @@
 									</svg>
 								</button>
 							{/if}
+
+							<!-- Move handle (visible when selected) -->
+							<div
+									data-table-move-handle
+									class="absolute -bottom-8 left-1/2 -translate-x-1/2 w-8 h-8 rounded-full bg-slate-700 border-2 border-indigo-500 flex items-center justify-center cursor-move text-indigo-300 hover:bg-indigo-500 hover:text-white transition-colors z-30 touch-none"
+									onpointerdown={(e) => startTableMoveFromHandle(table.id, e)}
+									aria-label="Move table"
+									role="button"
+									tabindex="-1"
+								>
+									<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 2l3 3h-2v4h4v-2l3 3-3 3v-2h-4v4h2l-3 3-3-3h2v-4H7v2l-3-3 3-3v2h4V5H9l3-3z" /></svg>
+							</div>
 						{/if}
 					</div>
 				{/each}
