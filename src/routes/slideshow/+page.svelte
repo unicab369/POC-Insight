@@ -81,6 +81,11 @@
 		textboxes: TextBox[];
 		shapes: SlideShape[];
 		tables: SlideTable[];
+		skipped?: boolean;
+		bgColor?: string;
+		bgImage?: string;
+		animationType?: 'fade' | 'dissolve' | 'flip' | 'slide-left' | 'slide-right';
+		animationSpeed?: number;
 	}
 
 	const STORAGE_KEY = 'poc-slideshow';
@@ -106,8 +111,8 @@
 			const tb2Id = nextTextboxId++;
 			return [
 				{ id: 1, title: 'Welcome to the Presentation', description: 'Click to edit this description', isLanding: true, images: [], textboxes: [
-					{ id: tb1Id, x: 10, y: 35, width: 80, height: 12, text: 'Welcome to the Presentation', role: 'title' as const, fontSize: 36, bold: true, align: 'center' as const, textColor: '#ffffff' },
-					{ id: tb2Id, x: 15, y: 52, width: 70, height: 12, text: 'Click to edit this description', role: 'subtitle' as const, fontSize: 16, align: 'center' as const, textColor: '#94a3b8' }
+					{ id: tb1Id, x: 5, y: 3, width: 90, height: 10, text: 'Welcome to the Presentation', role: 'title' as const, fontSize: 36, bold: true, align: 'center' as const, textColor: '#ffffff' },
+					{ id: tb2Id, x: 5, y: 16, width: 90, height: 78, text: 'Click to edit this description', role: 'subtitle' as const, fontSize: 16, align: 'center' as const, textColor: '#94a3b8' }
 				], shapes: [], tables: [] }
 			];
 		})()
@@ -122,13 +127,13 @@
 		if (!s.textboxes.some(t => t.role === 'title')) {
 			if (s.isLanding) {
 				s.textboxes.unshift(
-					{ id: nextTextboxId++, x: 10, y: 35, width: 80, height: 12, text: s.title || 'Untitled', role: 'title', fontSize: 36, bold: true, align: 'center', textColor: '#ffffff' },
-					{ id: nextTextboxId++, x: 15, y: 52, width: 70, height: 12, text: s.description || '', role: 'subtitle', fontSize: 16, align: 'center', textColor: '#94a3b8' }
+					{ id: nextTextboxId++, x: 5, y: 3, width: 90, height: 10, text: s.title || 'Untitled', role: 'title', fontSize: 36, bold: true, align: 'center', textColor: '#ffffff' },
+					{ id: nextTextboxId++, x: 5, y: 16, width: 90, height: 78, text: s.description || '', role: 'subtitle', fontSize: 16, align: 'center', textColor: '#94a3b8' }
 				);
 			} else {
 				s.textboxes.unshift(
-					{ id: nextTextboxId++, x: 5, y: 5, width: 55, height: 10, text: s.title || 'Untitled', role: 'title', fontSize: 24, bold: true, textColor: '#ffffff' },
-					{ id: nextTextboxId++, x: 5, y: 18, width: 65, height: 15, text: s.description || '', role: 'subtitle', fontSize: 14, textColor: '#94a3b8' }
+					{ id: nextTextboxId++, x: 5, y: 3, width: 90, height: 10, text: s.title || 'Untitled', role: 'title', fontSize: 24, bold: true, textColor: '#ffffff' },
+					{ id: nextTextboxId++, x: 5, y: 16, width: 90, height: 78, text: s.description || '', role: 'subtitle', fontSize: 14, textColor: '#94a3b8' }
 				);
 			}
 		}
@@ -142,7 +147,11 @@
 			nextImageId,
 			nextTextboxId,
 			nextShapeId,
-			nextTableId
+			nextTableId,
+			presenterQuestions: $state.snapshot(presenterQuestions),
+			presenterNotes: $state.snapshot(presenterNotes),
+			nextPresenterQId,
+			nextPresenterNId
 		};
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 	});
@@ -180,6 +189,217 @@
 	let cellSelectionEndCol = $state<number | null>(null);
 	let isDraggingCellSelection = $state(false);
 	let tableToolbarAnchorRect = $state<{top: number; left: number; width: number} | null>(null);
+
+	// Slide edit menu state
+	let slideMenuId = $state<number | null>(null);
+	let slideMenuAnchor = $state<{ x: number; y: number } | null>(null);
+
+	// Topbar background picker
+	let showBgPicker = $state(false);
+	let topbarBgFileInputEl = $state<HTMLInputElement | null>(null);
+
+	// Topbar animation picker
+	let showAnimationPicker = $state(false);
+	let showAnimPreview = $state(false);
+	let animPreviewKey = $state(0);
+
+	// Presentation transition state
+	let presentationTransition = $state<string | null>(null);
+	let presentationTransitionSpeed = $state(500);
+
+	// Presentation mode state
+	let presentationMode = $state(false);
+	let presentationSlideIndex = $state(0);
+	let presentationEl = $state<HTMLDivElement | null>(null);
+
+	// Presenter mode state
+	let presenterMode = $state(false);
+	let presenterSlideIndex = $state(0);
+	let presenterTimer = $state(0);
+	let presenterTimerRunning = $state(false);
+	let presenterTimerInterval = $state<ReturnType<typeof setInterval> | null>(null);
+	let presenterTab = $state<'presentation' | 'questions' | 'notes'>('presentation');
+
+	// Presenter questions & notes (persisted)
+	interface PresenterQuestion { id: number; text: string; answered?: boolean; }
+	interface PresenterNote { id: number; text: string; align?: 'left' | 'center' | 'right'; textColor?: string; bgColor?: string; }
+	let presenterQuestions = $state<PresenterQuestion[]>(saved?.presenterQuestions ?? []);
+	let presenterNotes = $state<PresenterNote[]>(saved?.presenterNotes ?? []);
+	let nextPresenterQId = $state(saved?.nextPresenterQId ?? 1);
+	let nextPresenterNId = $state(saved?.nextPresenterNId ?? 1);
+	let showAddQuestion = $state(false);
+	let newQuestionText = $state('');
+	let showAddNote = $state(false);
+	let newNoteText = $state('');
+	let newNoteAlign = $state<'left' | 'center' | 'right'>('left');
+	let newNoteTextColor = $state('#e2e8f0');
+	let newNoteBgColor = $state('transparent');
+	let editingQuestionId = $state<number | null>(null);
+	let editingNoteId = $state<number | null>(null);
+	let noteColorTarget = $state<{ noteId: number | 'new'; field: 'textColor' | 'bgColor' } | null>(null);
+
+	const noteColorSwatches = [
+		'transparent', '#0f172a', '#1e293b', '#334155', '#475569',
+		'#ffffff', '#e2e8f0', '#94a3b8', '#64748b',
+		'#ef4444', '#f97316', '#eab308', '#22c55e',
+		'#3b82f6', '#6366f1', '#a855f7', '#ec4899',
+		'#fecaca', '#fed7aa', '#fef08a', '#bbf7d0',
+		'#bfdbfe', '#c7d2fe', '#e9d5ff', '#fbcfe8',
+	];
+
+	function formatTime(seconds: number): string {
+		const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+		const s = (seconds % 60).toString().padStart(2, '0');
+		return `${m}:${s}`;
+	}
+
+	function startPresentation() {
+		let idx = slides.findIndex(s => s.id === selectedSlideId);
+		if (idx < 0) idx = 0;
+		// If starting on a skipped slide, find the nearest non-skipped
+		if (slides[idx]?.skipped) {
+			const forward = slides.findIndex((s, i) => i >= idx && !s.skipped);
+			if (forward >= 0) idx = forward;
+			else {
+				const backward = slides.findLastIndex((s, i) => i <= idx && !s.skipped);
+				if (backward >= 0) idx = backward;
+			}
+		}
+		presentationSlideIndex = idx;
+		presentationMode = true;
+		requestAnimationFrame(() => {
+			presentationEl?.requestFullscreen?.().catch(() => {});
+		});
+	}
+
+	function stopPresentation() {
+		presentationMode = false;
+		if (document.fullscreenElement) {
+			document.exitFullscreen?.().catch(() => {});
+		}
+	}
+
+	function triggerPresentationTransition(targetIndex: number) {
+		const targetSlide = slides[targetIndex];
+		const anim = targetSlide?.animationType;
+		const speed = targetSlide?.animationSpeed ?? 500;
+		if (!anim) {
+			presentationSlideIndex = targetIndex;
+			return;
+		}
+		presentationTransition = anim;
+		presentationTransitionSpeed = speed;
+		presentationSlideIndex = targetIndex;
+		setTimeout(() => { presentationTransition = null; }, speed);
+	}
+
+	function presentationNext() {
+		let next = presentationSlideIndex + 1;
+		while (next < slides.length && slides[next]?.skipped) next++;
+		if (next < slides.length) triggerPresentationTransition(next);
+	}
+
+	function presentationPrev() {
+		let prev = presentationSlideIndex - 1;
+		while (prev >= 0 && slides[prev]?.skipped) prev--;
+		if (prev >= 0) triggerPresentationTransition(prev);
+	}
+
+	// Presenter mode functions
+	function startPresenter() {
+		let idx = slides.findIndex(s => s.id === selectedSlideId);
+		if (idx < 0) idx = 0;
+		if (slides[idx]?.skipped) {
+			const forward = slides.findIndex((s, i) => i >= idx && !s.skipped);
+			if (forward >= 0) idx = forward;
+			else {
+				const backward = slides.findLastIndex((s, i) => i <= idx && !s.skipped);
+				if (backward >= 0) idx = backward;
+			}
+		}
+		presenterSlideIndex = idx;
+		presenterMode = true;
+		presenterTab = 'presentation';
+		presenterTimer = 0;
+		presenterTimerRunning = true;
+		presenterTimerInterval = setInterval(() => { presenterTimer++; }, 1000);
+		showAddQuestion = false;
+		showAddNote = false;
+		newQuestionText = '';
+		newNoteText = '';
+	}
+
+	function stopPresenter() {
+		presenterMode = false;
+		presenterTimerRunning = false;
+		if (presenterTimerInterval) { clearInterval(presenterTimerInterval); presenterTimerInterval = null; }
+		presenterTimer = 0;
+	}
+
+	function presenterNext() {
+		let next = presenterSlideIndex + 1;
+		while (next < slides.length && slides[next]?.skipped) next++;
+		if (next < slides.length) presenterSlideIndex = next;
+	}
+
+	function presenterPrev() {
+		let prev = presenterSlideIndex - 1;
+		while (prev >= 0 && slides[prev]?.skipped) prev--;
+		if (prev >= 0) presenterSlideIndex = prev;
+	}
+
+	function togglePresenterTimer() {
+		if (presenterTimerRunning) {
+			presenterTimerRunning = false;
+			if (presenterTimerInterval) { clearInterval(presenterTimerInterval); presenterTimerInterval = null; }
+		} else {
+			presenterTimerRunning = true;
+			presenterTimerInterval = setInterval(() => { presenterTimer++; }, 1000);
+		}
+	}
+
+	function resetPresenterTimer() {
+		presenterTimer = 0;
+	}
+
+	function addPresenterQuestion() {
+		const text = newQuestionText.trim();
+		if (!text) return;
+		presenterQuestions.push({ id: nextPresenterQId++, text });
+		newQuestionText = '';
+		showAddQuestion = false;
+	}
+
+	function deletePresenterQuestion(id: number) {
+		presenterQuestions = presenterQuestions.filter(q => q.id !== id);
+	}
+
+	function toggleQuestionAnswered(id: number) {
+		const q = presenterQuestions.find(q => q.id === id);
+		if (q) q.answered = !q.answered;
+	}
+
+	function addPresenterNote() {
+		const text = newNoteText.trim();
+		if (!text) return;
+		presenterNotes.push({
+			id: nextPresenterNId++,
+			text,
+			align: newNoteAlign,
+			textColor: newNoteTextColor,
+			bgColor: newNoteBgColor
+		});
+		newNoteText = '';
+		newNoteAlign = 'left';
+		newNoteTextColor = '#e2e8f0';
+		newNoteBgColor = 'transparent';
+		showAddNote = false;
+		noteColorTarget = null;
+	}
+
+	function deletePresenterNote(id: number) {
+		presenterNotes = presenterNotes.filter(n => n.id !== id);
+	}
 
 	// Slide drag-reorder state
 	let dragSlideId = $state<number | null>(null);
@@ -221,9 +441,6 @@
 		if (!item) return;
 		e.stopPropagation();
 
-		const el = e.currentTarget as HTMLElement;
-		el.setPointerCapture(e.pointerId);
-
 		const rect = slideCanvasEl.getBoundingClientRect();
 		const mx = ((e.clientX - rect.left) / rect.width) * 100;
 		const my = ((e.clientY - rect.top) / rect.height) * 100;
@@ -263,10 +480,9 @@
 			else refreshTableToolbarPosition();
 		};
 
-		const onUp = (ev: PointerEvent) => {
-			el.releasePointerCapture(ev.pointerId);
-			el.removeEventListener('pointermove', onMove);
-			el.removeEventListener('pointerup', onUp);
+		const onUp = () => {
+			document.removeEventListener('pointermove', onMove);
+			document.removeEventListener('pointerup', onUp);
 			if (canvasWrapperEl) canvasWrapperEl.style.overflow = '';
 			if (!dragging && elementWasSelected) {
 				if (kind === 'textbox') {
@@ -281,8 +497,8 @@
 			}
 		};
 
-		el.addEventListener('pointermove', onMove);
-		el.addEventListener('pointerup', onUp);
+		document.addEventListener('pointermove', onMove);
+		document.addEventListener('pointerup', onUp);
 	}
 
 	// Move table via handle (used when table is in edit mode)
@@ -682,13 +898,13 @@
 		const tb2Id = nextTextboxId++;
 		slides.push({
 			id,
-			title: `Slide ${slides.length + 1}`,
-			description: 'Click to edit this description',
+			title: '',
+			description: '',
 			isLanding: false,
 			images: [],
 			textboxes: [
-				{ id: tb1Id, x: 5, y: 5, width: 55, height: 10, text: `Slide ${slides.length + 1}`, role: 'title', fontSize: 24, bold: true, textColor: '#ffffff' },
-				{ id: tb2Id, x: 5, y: 18, width: 65, height: 15, text: 'Click to edit this description', role: 'subtitle', fontSize: 14, textColor: '#94a3b8' }
+				{ id: tb1Id, x: 5, y: 3, width: 90, height: 10, text: '', role: 'title', fontSize: 24, bold: true, textColor: '#ffffff' },
+				{ id: tb2Id, x: 5, y: 16, width: 90, height: 78, text: '', role: 'subtitle', fontSize: 14, textColor: '#94a3b8' }
 			],
 			shapes: [],
 			tables: []
@@ -704,6 +920,21 @@
 		if (selectedSlideId === id) {
 			selectedSlideId = slides[Math.min(index, slides.length - 1)].id;
 		}
+	}
+
+	function duplicateSlide(id: number) {
+		const index = slides.findIndex((s) => s.id === id);
+		if (index === -1) return;
+		saveHistory();
+		const clone = structuredClone($state.snapshot(slides[index])) as Slide;
+		clone.id = nextId++;
+		for (const tb of clone.textboxes) tb.id = nextTextboxId++;
+		for (const img of clone.images) img.id = nextImageId++;
+		for (const sh of clone.shapes) sh.id = nextShapeId++;
+		for (const tbl of clone.tables) tbl.id = nextTableId++;
+		slides.splice(index + 1, 0, clone);
+		selectedSlideId = clone.id;
+		slideMenuId = null;
 	}
 
 	function moveSlide(id: number, direction: -1 | 1) {
@@ -914,7 +1145,8 @@
 
 	function handleCanvasMousedown(e: MouseEvent) {
 		if (activeTool !== 'textbox' && activeTool !== 'image' && activeTool !== 'shape') return;
-		if ((e.target as HTMLElement).closest('[data-textbox]')) return;
+		const closestTb = (e.target as HTMLElement).closest('[data-textbox]');
+		if (closestTb && !closestTb.hasAttribute('data-textbox-role')) return;
 		if ((e.target as HTMLElement).closest('[data-image]')) return;
 		if ((e.target as HTMLElement).closest('[data-shape]')) return;
 		if ((e.target as HTMLElement).closest('[data-table]')) return;
@@ -959,8 +1191,8 @@
 			saveHistory();
 			const id = nextShapeId++;
 			const isLine = selectedShapeType === 'line' || selectedShapeType === 'arrow';
-			const w = isLine ? 25 : 15;
-			const h = isLine ? 2 : 24;
+			const w = 15;
+			const h = isLine ? 15 : 24;
 			const x = Math.max(0, Math.min(pos.x - w / 2, 100 - w));
 			const y = Math.max(0, Math.min(pos.y - h / 2, 100 - h));
 			selectedSlide.shapes.push({
@@ -1642,6 +1874,46 @@
 		closeCamera();
 		goto('/');
 	}
+
+	function closeButtonAction(node: HTMLElement) {
+		const handler = (e: MouseEvent) => {
+			e.preventDefault();
+			e.stopPropagation();
+			e.stopImmediatePropagation();
+			close();
+		};
+		node.addEventListener('click', handler, true);
+		return { destroy() { node.removeEventListener('click', handler, true); } };
+	}
+
+	function stopPresentationAction(node: HTMLElement) {
+		const handler = (e: MouseEvent) => {
+			e.preventDefault();
+			e.stopPropagation();
+			e.stopImmediatePropagation();
+			stopPresentation();
+		};
+		node.addEventListener('click', handler, true);
+		return { destroy() { node.removeEventListener('click', handler, true); } };
+	}
+
+	// Exit presentation mode when leaving fullscreen (e.g. browser Escape)
+	$effect(() => {
+		const handler = () => {
+			if (!document.fullscreenElement && presentationMode) {
+				presentationMode = false;
+			}
+		};
+		document.addEventListener('fullscreenchange', handler);
+		return () => document.removeEventListener('fullscreenchange', handler);
+	});
+
+	// Cleanup presenter timer on unmount
+	$effect(() => {
+		return () => {
+			if (presenterTimerInterval) clearInterval(presenterTimerInterval);
+		};
+	});
 </script>
 
 <svelte:window
@@ -1656,8 +1928,38 @@
 		if (showTablePicker && !target.closest('[data-table-picker]') && !target.closest('[data-table-btn]')) {
 			showTablePicker = false;
 		}
+		if (slideMenuId !== null && !target.closest('[data-slide-menu]')) {
+			slideMenuId = null;
+
+			slideMenuAnchor = null;
+		}
+		if (showBgPicker && !target.closest('[data-bg-picker]')) {
+			showBgPicker = false;
+		}
+		if (showAnimationPicker && !target.closest('[data-anim-picker]')) {
+			showAnimationPicker = false;
+		}
 	}}
 	onkeydown={(e) => {
+		// Presentation mode controls
+		if (presentationMode) {
+			if (e.key === ' ' || e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); presentationNext(); return; }
+			if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); presentationPrev(); return; }
+			if (e.key === 'Escape') { stopPresentation(); return; }
+			return;
+		}
+		// Presenter mode controls
+		if (presenterMode) {
+			const tag = (e.target as HTMLElement)?.tagName;
+			if (tag === 'INPUT' || tag === 'TEXTAREA') {
+				if (e.key === 'Escape') { (e.target as HTMLElement).blur(); return; }
+				return;
+			}
+			if (e.key === ' ' || e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); presenterNext(); return; }
+			if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); presenterPrev(); return; }
+			if (e.key === 'Escape') { showAddQuestion = false; showAddNote = false; stopPresenter(); return; }
+			return;
+		}
 		if (e.key === 'Escape') {
 			if (showTablePicker) { showTablePicker = false; return; }
 			if (showShapePicker) { showShapePicker = false; return; }
@@ -1711,11 +2013,12 @@
 <!-- Fullscreen overlay -->
 <div class="fixed inset-0 z-[100] flex flex-col bg-slate-950">
 	<!-- Top Toolbar (full width) -->
-	<div class="h-12 shrink-0 bg-slate-900 border-b border-slate-800 flex items-center px-3 gap-1 overflow-visible relative z-[110]">
+	<div class="shrink-0 bg-slate-900 border-b border-slate-800 overflow-visible relative z-[110]">
+	<div class="h-12 flex items-center px-3 gap-1">
 		<!-- Close button -->
 		<button
 			class="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
-			onclick={(e) => { e.stopPropagation(); close(); }}
+			use:closeButtonAction
 			aria-label="Close slideshow"
 			title="Close"
 		>
@@ -1887,6 +2190,263 @@
 				</div>
 			{/if}
 		</div>
+
+		<!-- Slide Background (hidden on mobile, shown in 2nd row) -->
+		<div class="relative hidden md:block" data-bg-picker>
+			<button
+				class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm transition-colors {showBgPicker
+					? 'bg-indigo-500/20 text-indigo-400'
+					: 'text-slate-400 hover:text-white hover:bg-slate-700'}"
+				onclick={() => { showBgPicker = !showBgPicker; }}
+				aria-label="Slide background"
+				title="Slide Background"
+			>
+				<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+					<rect x="3" y="3" width="18" height="18" rx="2" />
+					<path d="M3 16l5-5 4 4 4-6 5 7" />
+				</svg>
+				<span class="hidden lg:inline">Background</span>
+			</button>
+
+			{#if showBgPicker && selectedSlide}
+				<div
+					class="absolute top-full left-0 mt-1 p-3 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl z-50 w-[220px]"
+					data-bg-picker
+					onclick={(e) => e.stopPropagation()}
+				>
+					<p class="text-[10px] text-slate-400 uppercase tracking-wider mb-2">Slide Background</p>
+					<div class="space-y-3">
+						<div class="flex items-center gap-2">
+							<label class="text-xs text-slate-300 w-12">Color</label>
+							<input
+								type="color"
+								value={selectedSlide.bgColor ?? '#1e293b'}
+								oninput={(e) => { saveHistory(); selectedSlide!.bgColor = (e.target as HTMLInputElement).value; }}
+								onclick={(e) => e.stopPropagation()}
+								class="w-8 h-8 rounded cursor-pointer border border-slate-600 bg-transparent"
+							/>
+							{#if selectedSlide.bgColor}
+								<button
+									class="text-xs text-slate-400 hover:text-slate-200 transition-colors"
+									onclick={(e) => { e.stopPropagation(); saveHistory(); selectedSlide!.bgColor = undefined; }}
+								>Reset</button>
+							{/if}
+						</div>
+						<div class="flex items-center gap-2">
+							<label class="text-xs text-slate-300 w-12">Image</label>
+							<button
+								class="text-xs px-2.5 py-1 rounded bg-slate-700 text-slate-300 hover:bg-slate-600 transition-colors"
+								onclick={(e) => { e.stopPropagation(); topbarBgFileInputEl?.click(); }}
+							>Choose</button>
+							{#if selectedSlide.bgImage}
+								<button
+									class="text-xs text-slate-400 hover:text-slate-200 transition-colors"
+									onclick={(e) => { e.stopPropagation(); saveHistory(); selectedSlide!.bgImage = undefined; }}
+								>Clear</button>
+							{/if}
+							<input
+								bind:this={topbarBgFileInputEl}
+								type="file"
+								accept="image/*"
+								class="hidden"
+								onchange={(e) => {
+									const file = (e.target as HTMLInputElement).files?.[0];
+									if (!file || !selectedSlide) return;
+									const reader = new FileReader();
+									reader.onload = () => {
+										saveHistory();
+										selectedSlide!.bgImage = reader.result as string;
+									};
+									reader.readAsDataURL(file);
+									(e.target as HTMLInputElement).value = '';
+								}}
+							/>
+						</div>
+					</div>
+				</div>
+			{/if}
+		</div>
+
+		<!-- Slide Animation (hidden on mobile, shown in 2nd row) -->
+		<div class="relative hidden md:block" data-anim-picker>
+			<button
+				class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm transition-colors {showAnimationPicker
+					? 'bg-indigo-500/20 text-indigo-400'
+					: 'text-slate-400 hover:text-white hover:bg-slate-700'}"
+				onclick={() => { showAnimationPicker = !showAnimationPicker; }}
+				aria-label="Slide animation"
+				title="Slide Animation"
+			>
+				<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+					<rect x="2" y="6" width="8" height="12" rx="1" opacity="0.35" /><rect x="8" y="6" width="8" height="12" rx="1" opacity="0.6" /><rect x="14" y="6" width="8" height="12" rx="1" />
+				</svg>
+				<span class="hidden lg:inline">Animation</span>
+			</button>
+
+			{#if showAnimationPicker && selectedSlide}
+				<div
+					class="absolute top-full left-0 mt-1 p-3 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl z-50 w-[220px]"
+					data-anim-picker
+					onclick={(e) => e.stopPropagation()}
+				>
+					<p class="text-[10px] text-slate-400 uppercase tracking-wider mb-2">Slide Transition</p>
+					<div class="space-y-3">
+						<div>
+							<label class="text-xs text-slate-300 mb-1 block">Type</label>
+							<select
+								class="w-full bg-slate-700 border border-slate-600 rounded-lg px-2.5 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-indigo-500"
+								value={selectedSlide.animationType ?? ''}
+								onchange={(e) => {
+									saveHistory();
+									const val = (e.target as HTMLSelectElement).value;
+									selectedSlide!.animationType = val ? val as Slide['animationType'] : undefined;
+								}}
+							>
+								<option value="">None</option>
+								<option value="fade">Fade</option>
+								<option value="dissolve">Dissolve</option>
+								<option value="flip">Flip</option>
+								<option value="slide-left">Slide from Left</option>
+								<option value="slide-right">Slide from Right</option>
+							</select>
+						</div>
+						{#if selectedSlide.animationType}
+							<div>
+								<div class="flex items-center justify-between mb-1">
+									<label class="text-xs text-slate-300">Speed</label>
+									<span class="text-xs text-slate-500">{selectedSlide.animationSpeed ?? 500}ms</span>
+								</div>
+								<input
+									type="range"
+									min="100"
+									max="2000"
+									step="50"
+									value={selectedSlide.animationSpeed ?? 500}
+									oninput={(e) => {
+										saveHistory();
+										selectedSlide!.animationSpeed = parseInt((e.target as HTMLInputElement).value);
+									}}
+									class="w-full accent-indigo-500"
+								/>
+								<div class="flex justify-between text-[10px] text-slate-500 mt-0.5">
+									<span>Fast</span>
+									<span>Slow</span>
+								</div>
+							</div>
+							<button
+								class="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500/30 transition-colors"
+								onclick={(e) => { e.stopPropagation(); showAnimPreview = true; animPreviewKey++; }}
+							>
+								<svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><polygon points="5,3 19,12 5,21" /></svg>
+								Preview
+							</button>
+						{/if}
+					</div>
+				</div>
+			{/if}
+		</div>
+
+		<!-- Spacer -->
+		<div class="flex-1"></div>
+
+		<!-- Presenter button (hidden on mobile, shown in 2nd row) -->
+		<button
+			class="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-700 transition-colors"
+			onclick={startPresenter}
+			aria-label="Presenter view"
+			title="Presenter View"
+		>
+			<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+				<rect x="2" y="3" width="20" height="14" rx="2" />
+				<path d="M8 21h8" />
+				<path d="M12 17v4" />
+				<path d="M7 9h2v2H7z" fill="currentColor" />
+				<rect x="12" y="8" width="5" height="1.5" rx="0.5" />
+				<rect x="12" y="11" width="3" height="1.5" rx="0.5" />
+			</svg>
+		</button>
+
+		<!-- Slideshow button (hidden on mobile, shown in 2nd row) -->
+		<button
+			class="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-indigo-500 text-white hover:bg-indigo-400 transition-colors"
+			onclick={startPresentation}
+			aria-label="Start slideshow"
+			title="Start Slideshow"
+		>
+			<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+				<polygon points="5,3 19,12 5,21" />
+			</svg>
+		</button>
+	</div>
+
+	<!-- Mobile 2nd toolbar row: Background, Animation, Slideshow -->
+	<div class="h-11 flex md:hidden items-center px-3 gap-1 border-t border-slate-800">
+		<!-- Slide Background -->
+		<div class="relative" data-bg-picker>
+			<button
+				class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm transition-colors {showBgPicker
+					? 'bg-indigo-500/20 text-indigo-400'
+					: 'text-slate-400 hover:text-white hover:bg-slate-700'}"
+				onclick={() => { showBgPicker = !showBgPicker; }}
+				aria-label="Slide background"
+				title="Slide Background"
+			>
+				<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+					<rect x="3" y="3" width="18" height="18" rx="2" />
+					<path d="M3 16l5-5 4 4 4-6 5 7" />
+				</svg>
+				<span class="text-xs">Background</span>
+			</button>
+		</div>
+
+		<!-- Slide Animation -->
+		<div class="relative" data-anim-picker>
+			<button
+				class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm transition-colors {showAnimationPicker
+					? 'bg-indigo-500/20 text-indigo-400'
+					: 'text-slate-400 hover:text-white hover:bg-slate-700'}"
+				onclick={() => { showAnimationPicker = !showAnimationPicker; }}
+				aria-label="Slide animation"
+				title="Slide Animation"
+			>
+				<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+					<rect x="2" y="6" width="8" height="12" rx="1" opacity="0.35" /><rect x="8" y="6" width="8" height="12" rx="1" opacity="0.6" /><rect x="14" y="6" width="8" height="12" rx="1" />
+				</svg>
+				<span class="text-xs">Animation</span>
+			</button>
+		</div>
+
+		<div class="flex-1"></div>
+
+		<!-- Presenter button -->
+		<button
+			class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium text-slate-300 hover:text-white hover:bg-slate-700 transition-colors"
+			onclick={startPresenter}
+			aria-label="Presenter view"
+			title="Presenter View"
+		>
+			<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+				<rect x="2" y="3" width="20" height="14" rx="2" />
+				<path d="M8 21h8" />
+				<path d="M12 17v4" />
+				<path d="M7 9h2v2H7z" fill="currentColor" />
+				<rect x="12" y="8" width="5" height="1.5" rx="0.5" />
+				<rect x="12" y="11" width="3" height="1.5" rx="0.5" />
+			</svg>
+		</button>
+
+		<!-- Slideshow button -->
+		<button
+			class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-indigo-500 text-white hover:bg-indigo-400 transition-colors"
+			onclick={startPresentation}
+			aria-label="Start slideshow"
+			title="Start Slideshow"
+		>
+			<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+				<polygon points="5,3 19,12 5,21" />
+			</svg>
+		</button>
+	</div>
 	</div>
 
 	<!-- Body: Sidebar + Slide Content -->
@@ -1938,7 +2498,13 @@
 							? 'border-indigo-500 shadow-lg shadow-indigo-500/20'
 							: 'border-slate-700 hover:border-slate-600'}"
 					>
-						<div class="w-full h-full bg-slate-900 relative overflow-hidden">
+						<div class="w-full h-full bg-slate-900 relative overflow-hidden" style="{slide.bgColor ? `background-color:${slide.bgColor}` : ''}{slide.bgImage ? `;background-image:url(${slide.bgImage});background-size:cover;background-position:center` : ''}">
+							<!-- Skip overlay -->
+							{#if slide.skipped}
+								<div class="absolute inset-0 bg-black/50 z-10 flex items-center justify-center">
+									<svg class="w-6 h-6 text-white/70" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
+								</div>
+							{/if}
 							<!-- Textboxes (including title/subtitle) -->
 							{#each slide.textboxes as tb}
 								<div
@@ -1977,10 +2543,10 @@
 										{:else if sh.type === 'rounded-square'}
 											<rect x="2" y="2" width="96" height="96" rx="12" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
 										{:else if sh.type === 'line'}
-											<line x1="0" y1="50" x2="100" y2="50" stroke={sh.borderColor} stroke-width="4" />
+											<line x1="5" y1="95" x2="95" y2="5" stroke={sh.borderColor} stroke-width="4" />
 										{:else if sh.type === 'arrow'}
-											<line x1="0" y1="50" x2="90" y2="50" stroke={sh.borderColor} stroke-width="4" />
-											<polygon points="85,35 100,50 85,65" fill={sh.borderColor} />
+											<line x1="5" y1="95" x2="90" y2="10" stroke={sh.borderColor} stroke-width="4" />
+											<polygon points="82,0 100,0 100,18" fill={sh.borderColor} />
 										{:else}
 											<rect x="2" y="2" width="96" height="96" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
 										{/if}
@@ -2010,41 +2576,44 @@
 						</div>
 					</div>
 
-					<!-- Delete button -->
-					{#if !slide.isLanding}
-						<button
-							data-slide-btn
-							class="absolute -top-1.5 -right-1 z-10 w-5 h-5 rounded-full bg-slate-700 flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-red-500 text-slate-400 hover:text-white transition-all"
-							onclick={(e) => {
-								e.stopPropagation();
-								deleteSlide(slide.id);
-							}}
-							aria-label="Delete slide"
-						>
-							<svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-								<path d="M18 6L6 18M6 6l12 12" />
-							</svg>
-						</button>
-					{/if}
-
-					<!-- Reorder buttons -->
-					{#if selectedSlideId === slide.id && slides.length > 1}
-						<div data-slide-btn class="absolute -right-2 top-1/2 -translate-y-1/2 z-10 flex flex-col gap-1">
+					<!-- Sidebar buttons (reorder + edit) -->
+					{#if selectedSlideId === slide.id}
+						<div data-slide-menu data-slide-btn class="absolute -right-2 top-1/2 -translate-y-1/2 z-10 flex flex-col gap-1">
+							{#if slides.length > 1}
+								<button
+									class="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center transition-all {i > 0 ? 'text-indigo-300 hover:bg-indigo-500 hover:text-white' : 'opacity-30 text-slate-500 cursor-default'}"
+									onclick={(e) => { e.stopPropagation(); moveSlide(slide.id, -1); }}
+									aria-label="Move slide up"
+									disabled={i === 0}
+								>
+									<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6" /></svg>
+								</button>
+								<button
+									class="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center transition-all {i < slides.length - 1 ? 'text-indigo-300 hover:bg-indigo-500 hover:text-white' : 'opacity-30 text-slate-500 cursor-default'}"
+									onclick={(e) => { e.stopPropagation(); moveSlide(slide.id, 1); }}
+									aria-label="Move slide down"
+									disabled={i === slides.length - 1}
+								>
+									<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
+								</button>
+							{/if}
 							<button
-								class="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center transition-all {i > 0 ? 'text-indigo-300 hover:bg-indigo-500 hover:text-white' : 'opacity-30 text-slate-500 cursor-default'}"
-								onclick={(e) => { e.stopPropagation(); moveSlide(slide.id, -1); }}
-								aria-label="Move slide up"
-								disabled={i === 0}
+								class="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center text-slate-300 hover:bg-indigo-500 hover:text-white transition-all"
+								onclick={(e) => {
+									e.stopPropagation();
+									if (slideMenuId === slide.id) {
+										slideMenuId = null;
+										slideMenuAnchor = null;
+									} else {
+										const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+										slideMenuAnchor = { x: rect.right + 8, y: rect.top + rect.height / 2 };
+										slideMenuId = slide.id;
+									}
+						
+								}}
+								aria-label="Slide options"
 							>
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6" /></svg>
-							</button>
-							<button
-								class="w-7 h-7 rounded-full bg-slate-700 flex items-center justify-center transition-all {i < slides.length - 1 ? 'text-indigo-300 hover:bg-indigo-500 hover:text-white' : 'opacity-30 text-slate-500 cursor-default'}"
-								onclick={(e) => { e.stopPropagation(); moveSlide(slide.id, 1); }}
-								aria-label="Move slide down"
-								disabled={i === slides.length - 1}
-							>
-								<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
+								<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="6" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="12" cy="18" r="1.5" /></svg>
 							</button>
 						</div>
 					{/if}
@@ -2072,7 +2641,7 @@
 			<div
 				bind:this={slideCanvasEl}
 				class="relative w-full bg-slate-900 rounded-xl border border-slate-800 overflow-hidden select-none origin-center transition-transform duration-100"
-				style="max-width:1100px;aspect-ratio:16/10;transform:scale({canvasZoom})"
+				style="max-width:1100px;aspect-ratio:16/10;transform:scale({canvasZoom});{selectedSlide?.bgColor ? `background-color:${selectedSlide.bgColor}` : ''}{selectedSlide?.bgImage ? `;background-image:url(${selectedSlide.bgImage});background-size:cover;background-position:center` : ''}"
 				class:cursor-crosshair={activeTool === 'textbox' || activeTool === 'image' || activeTool === 'shape'}
 				role="presentation"
 				onmousedown={handleCanvasMousedown}
@@ -2089,10 +2658,11 @@
 					<div
 						data-textbox
 						data-textbox-id={tb.id}
+						data-textbox-role={tb.role ?? undefined}
 						class="absolute border-2 rounded transition-colors touch-none {selectedTextboxId === tb.id
-							? 'border-indigo-500 shadow-lg shadow-indigo-500/10 z-20'
-							: 'border-slate-600 hover:border-slate-500'}"
-						style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%;background:{tb.bgColor ?? 'transparent'}"
+							? editingTextboxId === tb.id ? 'border-indigo-500 shadow-lg shadow-indigo-500/10 z-20' : 'border-indigo-500 shadow-lg shadow-indigo-500/10'
+							: tb.role ? 'border-slate-700 hover:border-slate-600' : 'border-slate-600 hover:border-slate-500'}"
+						style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%;background:{tb.bgColor ?? 'transparent'};{tb.role && activeTool ? 'pointer-events:none' : ''}"
 						role="button"
 						tabindex="0"
 						onpointerdown={(e) => {
@@ -2102,7 +2672,12 @@
 							elementWasSelected = selectedTextboxId === tb.id;
 							e.preventDefault();
 							selectTextbox(tb.id, e);
-							startElementDragPointer('textbox', tb.id, e);
+							if (tb.role) {
+								editingTextboxId = tb.id;
+								showFormattingToolbar = true;
+							} else {
+								startElementDragPointer('textbox', tb.id, e);
+							}
 						}}
 						onkeydown={(e) => e.key === 'Enter' && startEditingTextbox(tb.id, new MouseEvent('click'))}
 					>
@@ -2185,7 +2760,7 @@
 						data-image
 						data-image-id={image.id}
 						class="absolute rounded transition-colors touch-none {selectedImageId === image.id
-							? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10 z-20'
+							? activeImageId === image.id ? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10 z-20' : 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10'
 							: image.src === ''
 								? 'border-2 border-dashed border-slate-600 hover:border-slate-500'
 								: 'border-2 border-slate-600 hover:border-slate-500'}"
@@ -2256,7 +2831,7 @@
 						data-shape
 						data-shape-id={shape.id}
 						class="absolute transition-colors touch-none {selectedShapeId === shape.id
-							? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10 z-20'
+							? editingShapeId === shape.id ? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10 z-20' : 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10'
 							: 'hover:ring-1 hover:ring-slate-500'}"
 						style="left:{shape.x}%;top:{shape.y}%;width:{shape.width}%;height:{shape.height}%"
 						role="button"
@@ -2280,10 +2855,10 @@
 						<!-- SVG shape -->
 						<svg class="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
 							{#if shape.type === 'line'}
-								<line x1="0" y1="50" x2="100" y2="50" stroke={shape.borderColor} stroke-width={shape.borderWidth * 2} fill="none" />
+								<line x1="5" y1="95" x2="95" y2="5" stroke={shape.borderColor} stroke-width={shape.borderWidth * 2} fill="none" />
 							{:else if shape.type === 'arrow'}
-								<line x1="0" y1="50" x2="90" y2="50" stroke={shape.borderColor} stroke-width={shape.borderWidth * 2} fill="none" />
-								<polygon points="85,35 100,50 85,65" fill={shape.borderColor} />
+								<line x1="5" y1="95" x2="90" y2="10" stroke={shape.borderColor} stroke-width={shape.borderWidth * 2} fill="none" />
+								<polygon points="82,0 100,0 100,18" fill={shape.borderColor} />
 							{:else if shape.type === 'square'}
 								<rect x="1" y="1" width="98" height="98" fill={shape.fillColor} stroke={shape.borderColor} stroke-width={shape.borderWidth * 2} vector-effect="non-scaling-stroke" />
 							{:else if shape.type === 'rounded-square'}
@@ -2324,18 +2899,12 @@
 
 						{#if selectedShapeId === shape.id}
 							<!-- Resize corner handles -->
-							{#each (shape.type === 'line' || shape.type === 'arrow'
-								? [
-									{ pos: 'top-1/2 left-0 -translate-x-1/2 -translate-y-1/2', cursor: 'cursor-ew-resize', corner: 'tl' as const },
-									{ pos: 'top-1/2 right-0 translate-x-1/2 -translate-y-1/2', cursor: 'cursor-ew-resize', corner: 'tr' as const },
-								]
-								: [
+							{#each [
 									{ pos: 'top-0 left-0 -translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'tl' as const },
 									{ pos: 'top-0 right-0 translate-x-1/2 -translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'tr' as const },
 									{ pos: 'bottom-0 left-0 -translate-x-1/2 translate-y-1/2', cursor: 'cursor-nesw-resize', corner: 'bl' as const },
 									{ pos: 'bottom-0 right-0 translate-x-1/2 translate-y-1/2', cursor: 'cursor-nwse-resize', corner: 'br' as const },
-								]
-							) as handle}
+								] as handle}
 								<div
 									class="absolute {handle.pos} w-4 h-4 rounded-full bg-white border-2 border-indigo-500 {handle.cursor} z-30 touch-none"
 									onpointerdown={(e) => handleShapeResizePointerDown(shape.id, handle.corner, e)}
@@ -2369,7 +2938,7 @@
 						data-table
 						data-table-id={table.id}
 						class="absolute transition-colors touch-none {selectedTableId === table.id
-							? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10 z-20'
+							? editingTableId === table.id ? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10 z-20' : 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10'
 							: 'hover:ring-1 hover:ring-slate-500'}"
 						style="left:{table.x}%;top:{table.y}%;width:{table.width}%;height:{table.height}%"
 						role="button"
@@ -2880,3 +3449,847 @@
 		</div>
 	{/if}
 </div>
+
+<!-- Slide edit popup menu (fixed position, outside sidebar scroll) -->
+{#if slideMenuId !== null && slideMenuAnchor}
+	{@const menuSlide = slides.find(s => s.id === slideMenuId)}
+	{#if menuSlide}
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div data-slide-menu class="fixed z-[100] w-52 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl shadow-black/40 py-1.5 text-sm" style="left:{slideMenuAnchor.x}px;top:{slideMenuAnchor.y}px;transform:translateY(-50%)">
+			<!-- Duplicate -->
+			<button
+				class="w-full flex items-center gap-2.5 px-3 py-2 text-slate-200 hover:bg-slate-700 transition-colors"
+				onclick={(e) => { e.stopPropagation(); duplicateSlide(menuSlide.id); }}
+			>
+				<svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></svg>
+				Duplicate
+			</button>
+			<!-- Skip -->
+			<button
+				class="w-full flex items-center gap-2.5 px-3 py-2 text-slate-200 hover:bg-slate-700 transition-colors"
+				onclick={(e) => { e.stopPropagation(); saveHistory(); menuSlide.skipped = !menuSlide.skipped; }}
+			>
+				{#if menuSlide.skipped}
+					<svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+					Unskip
+				{:else}
+					<svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
+					Skip
+				{/if}
+				{#if menuSlide.skipped}
+					<span class="ml-auto text-xs text-amber-400/70">ON</span>
+				{/if}
+			</button>
+			<!-- Divider + Remove -->
+			{#if slides.length > 1}
+				<div class="border-t border-slate-700 my-1"></div>
+				<button
+					class="w-full flex items-center gap-2.5 px-3 py-2 text-red-400 hover:bg-red-500/10 transition-colors"
+					onclick={(e) => {
+						e.stopPropagation();
+						if (confirm('Remove this slide?')) {
+							const id = menuSlide.id;
+							slideMenuId = null;
+				
+							slideMenuAnchor = null;
+							deleteSlide(id);
+						}
+					}}
+				>
+					<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>
+					Remove
+				</button>
+			{/if}
+		</div>
+	{/if}
+{/if}
+
+<!-- Animation Preview Window -->
+{#if showAnimPreview && selectedSlide?.animationType}
+	{@const ps = selectedSlide}
+	<div class="fixed bottom-6 right-6 z-[150] w-[420px] bg-slate-900 border border-slate-700 rounded-xl shadow-2xl shadow-black/50 overflow-hidden">
+		<!-- Header -->
+		<div class="flex items-center justify-between px-3 py-2 bg-slate-800 border-b border-slate-700">
+			<span class="text-xs font-medium text-slate-300">Animation Preview</span>
+			<div class="flex items-center gap-1.5">
+				<button
+					class="w-6 h-6 rounded-full flex items-center justify-center text-indigo-400 hover:bg-indigo-500/20 transition-colors"
+					onclick={() => { animPreviewKey++; }}
+					title="Replay"
+				>
+					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M1 4v6h6M23 20v-6h-6" /><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15" /></svg>
+				</button>
+				<button
+					class="w-6 h-6 rounded-full flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
+					onclick={() => { showAnimPreview = false; }}
+					title="Close"
+				>
+					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12" /></svg>
+				</button>
+			</div>
+		</div>
+		<!-- Preview area -->
+		<div class="p-3 bg-black/30">
+			{#key animPreviewKey}
+				<div
+					class="w-full aspect-[16/10] rounded-lg overflow-hidden bg-slate-900 relative pres-anim-{ps.animationType}"
+					style="animation-duration:{ps.animationSpeed ?? 500}ms;{ps.bgColor ? `background-color:${ps.bgColor}` : ''}{ps.bgImage ? `;background-image:url(${ps.bgImage});background-size:cover;background-position:center` : ''}"
+				>
+					<!-- Textboxes -->
+					{#each ps.textboxes as tb}
+						<div
+							class="absolute overflow-hidden"
+							style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%;background:{tb.bgColor && tb.bgColor !== 'transparent' ? tb.bgColor : 'transparent'}"
+						>
+							<div class="p-px whitespace-pre-wrap break-words" style="font-family:{tb.fontFamily ?? 'sans-serif'};font-size:6px;font-weight:{tb.bold ? 'bold' : 'normal'};font-style:{tb.italic ? 'italic' : 'normal'};text-decoration:{tb.underline ? 'underline' : 'none'};text-align:{tb.align ?? 'left'};color:{tb.textColor ?? '#ffffff'};background:{tb.highlight ?? 'transparent'};line-height:1.2">{tb.text}</div>
+						</div>
+					{/each}
+					<!-- Images -->
+					{#each ps.images as img}
+						<div
+							class="absolute overflow-hidden rounded-sm"
+							style="left:{img.x}%;top:{img.y}%;width:{img.width}%;height:{img.height}%"
+						>
+							{#if img.src !== ''}
+								<img src={img.src} alt={img.name} class="w-full h-full object-cover" />
+							{/if}
+						</div>
+					{/each}
+					<!-- Shapes -->
+					{#each (ps.shapes ?? []) as sh}
+						<div
+							class="absolute overflow-hidden"
+							style="left:{sh.x}%;top:{sh.y}%;width:{sh.width}%;height:{sh.height}%"
+						>
+							<svg class="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+								{#if sh.type === 'circle'}
+									<ellipse cx="50" cy="50" rx="48" ry="48" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+								{:else if sh.type === 'triangle'}
+									<polygon points="50,2 98,98 2,98" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+								{:else if sh.type === 'diamond'}
+									<polygon points="50,2 98,50 50,98 2,50" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+								{:else if sh.type === 'star'}
+									<polygon points="50,5 61,35 95,35 68,57 79,90 50,70 21,90 32,57 5,35 39,35" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+								{:else if sh.type === 'rounded-square'}
+									<rect x="2" y="2" width="96" height="96" rx="12" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+								{:else if sh.type === 'line'}
+									<line x1="5" y1="95" x2="95" y2="5" stroke={sh.borderColor} stroke-width="4" />
+								{:else if sh.type === 'arrow'}
+									<line x1="5" y1="95" x2="90" y2="10" stroke={sh.borderColor} stroke-width="4" />
+									<polygon points="82,0 100,0 100,18" fill={sh.borderColor} />
+								{:else}
+									<rect x="2" y="2" width="96" height="96" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+								{/if}
+							</svg>
+							{#if sh.text}
+								<div class="absolute inset-0 flex items-center justify-center p-px" style="font-size:5px;color:{sh.textColor};text-align:{sh.align ?? 'center'};font-weight:{sh.bold ? 'bold' : 'normal'};line-height:1.2">{sh.text}</div>
+							{/if}
+						</div>
+					{/each}
+					<!-- Tables -->
+					{#each (ps.tables ?? []) as tbl}
+						<div
+							class="absolute overflow-hidden"
+							style="left:{tbl.x}%;top:{tbl.y}%;width:{tbl.width}%;height:{tbl.height}%"
+						>
+							<table class="w-full h-full" style="border-collapse:collapse;table-layout:fixed">
+								{#each tbl.cells as row}
+									<tr>
+										{#each row as c}
+											<td class="border border-slate-600/50" style="font-size:5px;color:{c.textColor ?? '#ffffff'};background:{c.bgColor ?? 'transparent'};padding:0 1px;line-height:1.2;vertical-align:top">{c.text}</td>
+										{/each}
+									</tr>
+								{/each}
+							</table>
+						</div>
+					{/each}
+				</div>
+			{/key}
+		</div>
+	</div>
+{/if}
+
+<!-- Presentation Mode Overlay -->
+{#if presentationMode}
+	{@const slide = slides[presentationSlideIndex]}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div
+		bind:this={presentationEl}
+		class="fixed inset-0 z-[200] bg-black flex items-center justify-center cursor-none"
+		onclick={presentationNext}
+	>
+		{#if slide}
+			{#key presentationSlideIndex}
+			<div
+				class="relative w-full h-full max-h-screen {presentationTransition ? `pres-anim-${presentationTransition}` : ''}"
+				style="aspect-ratio:16/10;max-width:calc(100vh * 16 / 10);{presentationTransition ? `animation-duration:${presentationTransitionSpeed}ms` : ''}"
+			>
+				<div class="absolute inset-0 bg-slate-900 overflow-hidden" style="{slide.bgColor ? `background-color:${slide.bgColor}` : ''}{slide.bgImage ? `;background-image:url(${slide.bgImage});background-size:cover;background-position:center` : ''}">
+					<!-- Textboxes -->
+					{#each slide.textboxes as tb}
+						<div
+							class="absolute overflow-hidden"
+							style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%;background:{tb.bgColor && tb.bgColor !== 'transparent' ? tb.bgColor : 'transparent'}"
+						>
+							<div class="p-2 whitespace-pre-wrap break-words" style="font-family:{tb.fontFamily ?? 'sans-serif'};font-size:{tb.fontSize ?? 16}px;font-weight:{tb.bold ? 'bold' : 'normal'};font-style:{tb.italic ? 'italic' : 'normal'};text-decoration:{tb.underline ? 'underline' : 'none'};text-align:{tb.align ?? 'left'};color:{tb.textColor ?? '#ffffff'};background:{tb.highlight ?? 'transparent'};line-height:1.4">{tb.text}</div>
+						</div>
+					{/each}
+					<!-- Images -->
+					{#each slide.images as img}
+						<div
+							class="absolute overflow-hidden rounded"
+							style="left:{img.x}%;top:{img.y}%;width:{img.width}%;height:{img.height}%"
+						>
+							{#if img.src !== ''}
+								<img src={img.src} alt={img.name} class="w-full h-full object-cover" />
+							{/if}
+						</div>
+					{/each}
+					<!-- Shapes -->
+					{#each (slide.shapes ?? []) as sh}
+						<div
+							class="absolute overflow-hidden"
+							style="left:{sh.x}%;top:{sh.y}%;width:{sh.width}%;height:{sh.height}%"
+						>
+							<svg class="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+								{#if sh.type === 'circle'}
+									<ellipse cx="50" cy="50" rx="48" ry="48" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+								{:else if sh.type === 'triangle'}
+									<polygon points="50,2 98,98 2,98" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+								{:else if sh.type === 'diamond'}
+									<polygon points="50,2 98,50 50,98 2,50" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+								{:else if sh.type === 'star'}
+									<polygon points="50,5 61,35 95,35 68,57 79,90 50,70 21,90 32,57 5,35 39,35" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+								{:else if sh.type === 'rounded-square'}
+									<rect x="2" y="2" width="96" height="96" rx="12" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+								{:else if sh.type === 'line'}
+									<line x1="0" y1="50" x2="100" y2="50" stroke={sh.borderColor} stroke-width="2" />
+								{:else if sh.type === 'arrow'}
+									<line x1="0" y1="50" x2="90" y2="50" stroke={sh.borderColor} stroke-width="2" />
+									<polygon points="85,35 100,50 85,65" fill={sh.borderColor} />
+								{:else}
+									<rect x="2" y="2" width="96" height="96" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+								{/if}
+							</svg>
+							{#if sh.text}
+								<div class="absolute inset-0 flex items-center justify-center p-2" style="font-size:{sh.fontSize}px;color:{sh.textColor};text-align:{sh.align ?? 'center'};font-weight:{sh.bold ? 'bold' : 'normal'};font-style:{sh.italic ? 'italic' : 'normal'};line-height:1.3">{sh.text}</div>
+							{/if}
+						</div>
+					{/each}
+					<!-- Tables -->
+					{#each (slide.tables ?? []) as tbl}
+						<div
+							class="absolute overflow-hidden"
+							style="left:{tbl.x}%;top:{tbl.y}%;width:{tbl.width}%;height:{tbl.height}%"
+						>
+							<table class="w-full h-full" style="border-collapse:collapse;table-layout:fixed">
+								{#each tbl.cells as row}
+									<tr>
+										{#each row as c}
+											<td class="border border-slate-600" style="font-size:{c.fontSize ?? 14}px;color:{c.textColor ?? '#ffffff'};background:{c.bgColor ?? 'transparent'};padding:4px 8px;line-height:1.4;vertical-align:top;font-weight:{c.bold ? 'bold' : 'normal'};font-style:{c.italic ? 'italic' : 'normal'};text-align:{c.align ?? 'left'}">{c.text}</td>
+										{/each}
+									</tr>
+								{/each}
+							</table>
+						</div>
+					{/each}
+				</div>
+			</div>
+			{/key}
+
+			<!-- Slide counter (non-skipped slides only) -->
+			{@const nonSkipped = slides.filter(s => !s.skipped)}
+			{@const posInNonSkipped = nonSkipped.indexOf(slide) + 1}
+			<div class="absolute bottom-4 left-6 text-white/40 text-sm font-medium">
+				{posInNonSkipped > 0 ? posInNonSkipped : presentationSlideIndex + 1} / {nonSkipped.length}
+			</div>
+
+			<!-- Close FAB -->
+			<button
+				class="absolute bottom-6 right-6 w-12 h-12 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur-sm border border-white/20 flex items-center justify-center text-white/70 hover:text-white transition-all cursor-pointer z-10"
+				use:stopPresentationAction
+				title="Exit slideshow"
+			>
+				<svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" /></svg>
+			</button>
+		{/if}
+	</div>
+{/if}
+
+<!-- Presenter Mode Overlay -->
+{#if presenterMode}
+	{@const currentSlide = slides[presenterSlideIndex]}
+	{@const nonSkipped = slides.filter(s => !s.skipped)}
+	{@const posInNonSkipped = currentSlide ? nonSkipped.indexOf(currentSlide) + 1 : 0}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div class="fixed inset-0 z-[200] bg-slate-950 flex flex-col select-none">
+		<!-- Top bar: exit + timer + slide counter -->
+		<div class="h-12 flex items-center gap-3 px-3 bg-slate-900/80 border-b border-slate-800 shrink-0">
+			<button
+				class="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
+				onclick={stopPresenter}
+				title="Exit presenter view"
+			>
+				<svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" /></svg>
+			</button>
+			<div class="w-px h-5 bg-slate-700"></div>
+			<div class="flex items-center gap-2 font-mono text-sm text-white tabular-nums">
+				<svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+					<circle cx="12" cy="12" r="10" />
+					<polyline points="12,6 12,12 16,14" />
+				</svg>
+				{formatTime(presenterTimer)}
+			</div>
+			<button
+				class="px-2 py-0.5 rounded text-xs font-medium transition-colors {presenterTimerRunning ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30' : 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30'}"
+				onclick={togglePresenterTimer}
+			>{presenterTimerRunning ? 'Pause' : 'Resume'}</button>
+			<button
+				class="px-2 py-0.5 rounded text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
+				onclick={resetPresenterTimer}
+			>Reset</button>
+			<div class="flex-1"></div>
+			<div class="text-sm text-slate-400 font-medium">
+				{posInNonSkipped > 0 ? posInNonSkipped : presenterSlideIndex + 1} / {nonSkipped.length}
+			</div>
+		</div>
+
+		<!-- Main content area -->
+		<div class="flex-1 min-h-0 relative">
+			<!-- Presentation tab -->
+			{#if presenterTab === 'presentation'}
+				{@const prevIdx = (() => { let p = presenterSlideIndex - 1; while (p >= 0 && slides[p]?.skipped) p--; return p >= 0 ? p : -1; })()}
+				{@const nextIdx = (() => { let n = presenterSlideIndex + 1; while (n < slides.length && slides[n]?.skipped) n++; return n < slides.length ? n : -1; })()}
+				{@const prevSlide = prevIdx >= 0 ? slides[prevIdx] : null}
+				{@const nextSlide = nextIdx >= 0 ? slides[nextIdx] : null}
+				<div class="absolute inset-0 flex flex-col p-4 gap-3 overflow-hidden">
+					<!-- Current slide -->
+					<div class="flex-1 min-h-0 flex items-center justify-center">
+						{#if currentSlide}
+							<div class="relative h-full" style="aspect-ratio:16/10;max-width:100%;max-height:100%">
+								<div class="absolute inset-0 bg-slate-900 overflow-hidden rounded-lg shadow-2xl ring-1 ring-white/10" style="{currentSlide.bgColor ? `background-color:${currentSlide.bgColor}` : ''}{currentSlide.bgImage ? `;background-image:url(${currentSlide.bgImage});background-size:cover;background-position:center` : ''}">
+									{#each currentSlide.textboxes as tb}
+										<div class="absolute overflow-hidden" style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%;background:{tb.bgColor && tb.bgColor !== 'transparent' ? tb.bgColor : 'transparent'}">
+											<div class="p-2 whitespace-pre-wrap break-words" style="font-family:{tb.fontFamily ?? 'sans-serif'};font-size:{tb.fontSize ?? 16}px;font-weight:{tb.bold ? 'bold' : 'normal'};font-style:{tb.italic ? 'italic' : 'normal'};text-decoration:{tb.underline ? 'underline' : 'none'};text-align:{tb.align ?? 'left'};color:{tb.textColor ?? '#ffffff'};background:{tb.highlight ?? 'transparent'};line-height:1.4">{tb.text}</div>
+										</div>
+									{/each}
+									{#each currentSlide.images as img}
+										<div class="absolute overflow-hidden rounded" style="left:{img.x}%;top:{img.y}%;width:{img.width}%;height:{img.height}%">
+											{#if img.src !== ''}
+												<img src={img.src} alt={img.name} class="w-full h-full object-cover" />
+											{/if}
+										</div>
+									{/each}
+									{#each (currentSlide.shapes ?? []) as sh}
+										<div class="absolute overflow-hidden" style="left:{sh.x}%;top:{sh.y}%;width:{sh.width}%;height:{sh.height}%">
+											<svg class="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+												{#if sh.type === 'circle'}
+													<ellipse cx="50" cy="50" rx="48" ry="48" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+												{:else if sh.type === 'triangle'}
+													<polygon points="50,2 98,98 2,98" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+												{:else if sh.type === 'diamond'}
+													<polygon points="50,2 98,50 50,98 2,50" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+												{:else if sh.type === 'star'}
+													<polygon points="50,5 61,35 95,35 68,57 79,90 50,70 21,90 32,57 5,35 39,35" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+												{:else if sh.type === 'rounded-square'}
+													<rect x="2" y="2" width="96" height="96" rx="12" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+												{:else if sh.type === 'line'}
+													<line x1="0" y1="50" x2="100" y2="50" stroke={sh.borderColor} stroke-width="2" />
+												{:else if sh.type === 'arrow'}
+													<line x1="0" y1="50" x2="90" y2="50" stroke={sh.borderColor} stroke-width="2" />
+													<polygon points="85,35 100,50 85,65" fill={sh.borderColor} />
+												{:else}
+													<rect x="2" y="2" width="96" height="96" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+												{/if}
+											</svg>
+											{#if sh.text}
+												<div class="absolute inset-0 flex items-center justify-center p-2" style="font-size:{sh.fontSize}px;color:{sh.textColor};text-align:{sh.align ?? 'center'};font-weight:{sh.bold ? 'bold' : 'normal'};font-style:{sh.italic ? 'italic' : 'normal'};line-height:1.3">{sh.text}</div>
+											{/if}
+										</div>
+									{/each}
+									{#each (currentSlide.tables ?? []) as tbl}
+										<div class="absolute overflow-hidden" style="left:{tbl.x}%;top:{tbl.y}%;width:{tbl.width}%;height:{tbl.height}%">
+											<table class="w-full h-full" style="border-collapse:collapse;table-layout:fixed">
+												{#each tbl.cells as row}
+													<tr>
+														{#each row as c}
+															<td class="border border-slate-600" style="font-size:{c.fontSize ?? 14}px;color:{c.textColor ?? '#ffffff'};background:{c.bgColor ?? 'transparent'};padding:4px 8px;line-height:1.4;vertical-align:top;font-weight:{c.bold ? 'bold' : 'normal'};font-style:{c.italic ? 'italic' : 'normal'};text-align:{c.align ?? 'left'}">{c.text}</td>
+														{/each}
+													</tr>
+												{/each}
+											</table>
+										</div>
+									{/each}
+								</div>
+							</div>
+						{/if}
+					</div>
+
+					<!-- Previous / Next thumbnails side by side -->
+					<div class="flex items-stretch gap-3 shrink-0" style="height:clamp(80px, 18vh, 140px)">
+						<!-- Previous slide -->
+						<button
+							class="flex-1 min-w-0 rounded-lg overflow-hidden transition-all {prevSlide ? 'cursor-pointer ring-1 ring-white/10 hover:ring-white/30' : 'opacity-30 cursor-default'}"
+							onclick={() => { if (prevSlide) presenterPrev(); }}
+							disabled={!prevSlide}
+						>
+							<div class="relative w-full h-full flex items-center justify-center bg-slate-900/50">
+								{#if prevSlide}
+									<div class="relative h-full" style="aspect-ratio:16/10;max-width:100%;max-height:100%">
+										<div class="absolute inset-0 bg-slate-900 overflow-hidden" style="{prevSlide.bgColor ? `background-color:${prevSlide.bgColor}` : ''}{prevSlide.bgImage ? `;background-image:url(${prevSlide.bgImage});background-size:cover;background-position:center` : ''}">
+											{#each prevSlide.textboxes as tb}
+												<div class="absolute overflow-hidden" style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%">
+													<div class="whitespace-pre-wrap break-words" style="font-family:{tb.fontFamily ?? 'sans-serif'};font-size:clamp(3px, 0.8vw, 6px);font-weight:{tb.bold ? 'bold' : 'normal'};text-align:{tb.align ?? 'left'};color:{tb.textColor ?? '#ffffff'};line-height:1.2;padding:1px">{tb.text}</div>
+												</div>
+											{/each}
+											{#each prevSlide.images as img}
+												<div class="absolute overflow-hidden" style="left:{img.x}%;top:{img.y}%;width:{img.width}%;height:{img.height}%">
+													{#if img.src !== ''}<img src={img.src} alt={img.name} class="w-full h-full object-cover" />{/if}
+												</div>
+											{/each}
+											{#each (prevSlide.shapes ?? []) as sh}
+												<div class="absolute overflow-hidden" style="left:{sh.x}%;top:{sh.y}%;width:{sh.width}%;height:{sh.height}%">
+													<svg class="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+														{#if sh.type === 'circle'}<ellipse cx="50" cy="50" rx="48" ry="48" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+														{:else if sh.type === 'triangle'}<polygon points="50,2 98,98 2,98" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+														{:else if sh.type === 'diamond'}<polygon points="50,2 98,50 50,98 2,50" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+														{:else if sh.type === 'star'}<polygon points="50,5 61,35 95,35 68,57 79,90 50,70 21,90 32,57 5,35 39,35" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+														{:else if sh.type === 'rounded-square'}<rect x="2" y="2" width="96" height="96" rx="12" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+														{:else if sh.type === 'line'}<line x1="0" y1="50" x2="100" y2="50" stroke={sh.borderColor} stroke-width="2" />
+														{:else if sh.type === 'arrow'}<line x1="0" y1="50" x2="90" y2="50" stroke={sh.borderColor} stroke-width="2" /><polygon points="85,35 100,50 85,65" fill={sh.borderColor} />
+														{:else}<rect x="2" y="2" width="96" height="96" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+														{/if}
+													</svg>
+												</div>
+											{/each}
+										</div>
+										<div class="absolute bottom-1 left-1.5 text-[9px] text-white/40 font-medium">Prev</div>
+									</div>
+								{:else}
+									<div class="text-slate-600 text-xs">No previous slide</div>
+								{/if}
+							</div>
+						</button>
+
+						<!-- Next slide -->
+						<button
+							class="flex-1 min-w-0 rounded-lg overflow-hidden transition-all {nextSlide ? 'cursor-pointer ring-1 ring-white/10 hover:ring-white/30' : 'opacity-30 cursor-default'}"
+							onclick={() => { if (nextSlide) presenterNext(); }}
+							disabled={!nextSlide}
+						>
+							<div class="relative w-full h-full flex items-center justify-center bg-slate-900/50">
+								{#if nextSlide}
+									<div class="relative h-full" style="aspect-ratio:16/10;max-width:100%;max-height:100%">
+										<div class="absolute inset-0 bg-slate-900 overflow-hidden" style="{nextSlide.bgColor ? `background-color:${nextSlide.bgColor}` : ''}{nextSlide.bgImage ? `;background-image:url(${nextSlide.bgImage});background-size:cover;background-position:center` : ''}">
+											{#each nextSlide.textboxes as tb}
+												<div class="absolute overflow-hidden" style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%">
+													<div class="whitespace-pre-wrap break-words" style="font-family:{tb.fontFamily ?? 'sans-serif'};font-size:clamp(3px, 0.8vw, 6px);font-weight:{tb.bold ? 'bold' : 'normal'};text-align:{tb.align ?? 'left'};color:{tb.textColor ?? '#ffffff'};line-height:1.2;padding:1px">{tb.text}</div>
+												</div>
+											{/each}
+											{#each nextSlide.images as img}
+												<div class="absolute overflow-hidden" style="left:{img.x}%;top:{img.y}%;width:{img.width}%;height:{img.height}%">
+													{#if img.src !== ''}<img src={img.src} alt={img.name} class="w-full h-full object-cover" />{/if}
+												</div>
+											{/each}
+											{#each (nextSlide.shapes ?? []) as sh}
+												<div class="absolute overflow-hidden" style="left:{sh.x}%;top:{sh.y}%;width:{sh.width}%;height:{sh.height}%">
+													<svg class="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+														{#if sh.type === 'circle'}<ellipse cx="50" cy="50" rx="48" ry="48" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+														{:else if sh.type === 'triangle'}<polygon points="50,2 98,98 2,98" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+														{:else if sh.type === 'diamond'}<polygon points="50,2 98,50 50,98 2,50" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+														{:else if sh.type === 'star'}<polygon points="50,5 61,35 95,35 68,57 79,90 50,70 21,90 32,57 5,35 39,35" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+														{:else if sh.type === 'rounded-square'}<rect x="2" y="2" width="96" height="96" rx="12" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+														{:else if sh.type === 'line'}<line x1="0" y1="50" x2="100" y2="50" stroke={sh.borderColor} stroke-width="2" />
+														{:else if sh.type === 'arrow'}<line x1="0" y1="50" x2="90" y2="50" stroke={sh.borderColor} stroke-width="2" /><polygon points="85,35 100,50 85,65" fill={sh.borderColor} />
+														{:else}<rect x="2" y="2" width="96" height="96" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+														{/if}
+													</svg>
+												</div>
+											{/each}
+										</div>
+										<div class="absolute bottom-1 right-1.5 text-[9px] text-white/40 font-medium">Next</div>
+									</div>
+								{:else}
+									<div class="text-slate-600 text-xs">No next slide</div>
+								{/if}
+							</div>
+						</button>
+					</div>
+				</div>
+
+			<!-- Questions tab -->
+			{:else if presenterTab === 'questions'}
+				<div class="absolute inset-0 flex flex-col">
+					<div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-2">
+						{#if presenterQuestions.length === 0}
+							<div class="flex flex-col items-center justify-center h-full text-slate-500">
+								<svg class="w-12 h-12 mb-3 text-slate-600" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+									<circle cx="12" cy="12" r="10" />
+									<path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3" />
+									<path d="M12 17h.01" />
+								</svg>
+								<p class="text-sm font-medium">No questions yet</p>
+								<p class="text-xs text-slate-600 mt-1">Tap + to add a question</p>
+							</div>
+						{:else}
+							{#each presenterQuestions as q (q.id)}
+								<div class="flex items-start gap-3 p-3 rounded-lg bg-slate-900/60 ring-1 ring-slate-800 group">
+									<button
+										class="mt-0.5 w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 transition-colors {q.answered ? 'border-emerald-500 bg-emerald-500/20' : 'border-slate-600 hover:border-slate-400'}"
+										onclick={() => toggleQuestionAnswered(q.id)}
+										title={q.answered ? 'Mark as unanswered' : 'Mark as answered'}
+									>
+										{#if q.answered}
+											<svg class="w-3 h-3 text-emerald-400" fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" /></svg>
+										{/if}
+									</button>
+									{#if editingQuestionId === q.id}
+										<input
+											type="text"
+											class="flex-1 bg-slate-800 text-white text-sm rounded px-2 py-1 outline-none ring-1 ring-indigo-500"
+											bind:value={q.text}
+											onkeydown={(e) => { if (e.key === 'Enter') editingQuestionId = null; }}
+											onblur={() => { editingQuestionId = null; }}
+										/>
+									{:else}
+										<p
+											class="flex-1 text-sm leading-relaxed cursor-pointer {q.answered ? 'text-slate-500 line-through' : 'text-slate-200'}"
+											ondblclick={() => { editingQuestionId = q.id; }}
+										>{q.text}</p>
+									{/if}
+									<button
+										class="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-red-400 transition-all shrink-0"
+										onclick={() => deletePresenterQuestion(q.id)}
+										title="Delete question"
+									>
+										<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" /></svg>
+									</button>
+								</div>
+							{/each}
+						{/if}
+					</div>
+					<!-- Add question FAB -->
+					{#if showAddQuestion}
+						<div class="p-4 border-t border-slate-800 bg-slate-900/60">
+							<div class="flex gap-2">
+								<input
+									type="text"
+									class="flex-1 bg-slate-800 text-white text-sm rounded-lg px-3 py-2 outline-none ring-1 ring-slate-700 focus:ring-indigo-500 placeholder:text-slate-500"
+									placeholder="Type your question..."
+									bind:value={newQuestionText}
+									onkeydown={(e) => { if (e.key === 'Enter') addPresenterQuestion(); if (e.key === 'Escape') { showAddQuestion = false; newQuestionText = ''; } }}
+								/>
+								<button
+									class="px-4 py-2 rounded-lg text-sm font-medium bg-indigo-500 text-white hover:bg-indigo-400 transition-colors"
+									onclick={addPresenterQuestion}
+								>Add</button>
+							</div>
+						</div>
+					{:else}
+						<div class="absolute bottom-6 right-6">
+							<button
+								class="w-12 h-12 rounded-full bg-indigo-500 hover:bg-indigo-400 text-white shadow-lg shadow-indigo-500/30 flex items-center justify-center transition-colors"
+								onclick={() => { showAddQuestion = true; }}
+								title="Add question"
+							>
+								<svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+							</button>
+						</div>
+					{/if}
+				</div>
+
+			<!-- Notes tab -->
+			{:else if presenterTab === 'notes'}
+				<div class="absolute inset-0 flex flex-col" onclick={(e) => { if (noteColorTarget && !(e.target as HTMLElement).closest('[data-note-colors]')) noteColorTarget = null; }}>
+					<div class="flex-1 min-h-0 overflow-y-auto p-4 space-y-2">
+						{#if presenterNotes.length === 0}
+							<div class="flex flex-col items-center justify-center h-full text-slate-500">
+								<svg class="w-12 h-12 mb-3 text-slate-600" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+									<path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+									<path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+								</svg>
+								<p class="text-sm font-medium">No notes yet</p>
+								<p class="text-xs text-slate-600 mt-1">Tap + to add a note</p>
+							</div>
+						{:else}
+							{#each presenterNotes as n (n.id)}
+								<div class="rounded-lg ring-1 ring-slate-800 group overflow-hidden" style="background:{n.bgColor && n.bgColor !== 'transparent' ? n.bgColor : 'rgb(15 23 42 / 0.6)'}">
+									{#if editingNoteId === n.id}
+										<!-- Edit mode -->
+										<div class="p-3">
+											<textarea
+												class="w-full bg-slate-800/80 text-sm rounded px-2 py-1.5 outline-none ring-1 ring-indigo-500 resize-none min-h-[60px]"
+												style="color:{n.textColor ?? '#e2e8f0'};text-align:{n.align ?? 'left'}"
+												bind:value={n.text}
+												onkeydown={(e) => { if (e.key === 'Escape') { editingNoteId = null; noteColorTarget = null; } }}
+											></textarea>
+											<!-- Formatting toolbar -->
+											<div class="flex items-center gap-1 mt-2 flex-wrap">
+												<!-- Alignment buttons -->
+												<div class="flex items-center rounded-lg bg-slate-800/80 p-0.5 gap-0.5">
+													<button class="p-1.5 rounded transition-colors {(n.align ?? 'left') === 'left' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white'}" onclick={() => { n.align = 'left'; }} title="Align left">
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17 10H3M21 6H3M21 14H3M17 18H3" /></svg>
+													</button>
+													<button class="p-1.5 rounded transition-colors {n.align === 'center' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white'}" onclick={() => { n.align = 'center'; }} title="Align center">
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 10H6M21 6H3M21 14H3M18 18H6" /></svg>
+													</button>
+													<button class="p-1.5 rounded transition-colors {n.align === 'right' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white'}" onclick={() => { n.align = 'right'; }} title="Align right">
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 10H7M21 6H3M21 14H3M21 18H7" /></svg>
+													</button>
+												</div>
+												<!-- Text color -->
+												<div class="relative" data-note-colors>
+													<button
+														class="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium bg-slate-800/80 transition-colors {noteColorTarget?.noteId === n.id && noteColorTarget?.field === 'textColor' ? 'text-indigo-300 ring-1 ring-indigo-500' : 'text-slate-400 hover:text-white'}"
+														onclick={() => { noteColorTarget = noteColorTarget?.noteId === n.id && noteColorTarget?.field === 'textColor' ? null : { noteId: n.id, field: 'textColor' }; }}
+														title="Text color"
+													>
+														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3l6.5 13H5.5L12 3z" /><path d="M3 20h18" stroke={n.textColor ?? '#e2e8f0'} stroke-width="3" /></svg>
+														<span>Text</span>
+													</button>
+													{#if noteColorTarget?.noteId === n.id && noteColorTarget?.field === 'textColor'}
+														<div class="absolute bottom-full left-0 mb-2 p-2 bg-slate-800 rounded-lg ring-1 ring-slate-700 shadow-xl z-10 grid grid-cols-8 gap-1 w-52" data-note-colors>
+															{#each noteColorSwatches.filter(c => c !== 'transparent') as color}
+																<button
+																	class="w-5 h-5 rounded-full ring-1 ring-white/10 hover:ring-white/40 transition-all {n.textColor === color ? 'ring-2 ring-indigo-400 scale-110' : ''}"
+																	style="background:{color}"
+																	onclick={() => { n.textColor = color; noteColorTarget = null; }}
+																></button>
+															{/each}
+														</div>
+													{/if}
+												</div>
+												<!-- Background color -->
+												<div class="relative" data-note-colors>
+													<button
+														class="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium bg-slate-800/80 transition-colors {noteColorTarget?.noteId === n.id && noteColorTarget?.field === 'bgColor' ? 'text-indigo-300 ring-1 ring-indigo-500' : 'text-slate-400 hover:text-white'}"
+														onclick={() => { noteColorTarget = noteColorTarget?.noteId === n.id && noteColorTarget?.field === 'bgColor' ? null : { noteId: n.id, field: 'bgColor' }; }}
+														title="Background color"
+													>
+														<div class="w-3.5 h-3.5 rounded border border-slate-500" style="background:{n.bgColor && n.bgColor !== 'transparent' ? n.bgColor : 'transparent'}"></div>
+														<span>Fill</span>
+													</button>
+													{#if noteColorTarget?.noteId === n.id && noteColorTarget?.field === 'bgColor'}
+														<div class="absolute bottom-full left-0 mb-2 p-2 bg-slate-800 rounded-lg ring-1 ring-slate-700 shadow-xl z-10 grid grid-cols-8 gap-1 w-52" data-note-colors>
+															{#each noteColorSwatches as color}
+																<button
+																	class="w-5 h-5 rounded-full ring-1 ring-white/10 hover:ring-white/40 transition-all {(n.bgColor ?? 'transparent') === color ? 'ring-2 ring-indigo-400 scale-110' : ''}"
+																	style="background:{color === 'transparent' ? 'repeating-conic-gradient(#334155 0% 25%, transparent 0% 50%) 50%/8px 8px' : color}"
+																	onclick={() => { n.bgColor = color; noteColorTarget = null; }}
+																	title={color === 'transparent' ? 'Transparent' : color}
+																></button>
+															{/each}
+														</div>
+													{/if}
+												</div>
+												<div class="flex-1"></div>
+												<!-- Done editing -->
+												<button
+													class="px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-500 text-white hover:bg-indigo-400 transition-colors"
+													onclick={() => { editingNoteId = null; noteColorTarget = null; }}
+												>Done</button>
+											</div>
+										</div>
+									{:else}
+										<!-- View mode -->
+										<div class="flex items-start gap-3 p-3">
+											<p
+												class="flex-1 text-sm leading-relaxed whitespace-pre-wrap"
+												style="color:{n.textColor ?? '#e2e8f0'};text-align:{n.align ?? 'left'}"
+											>{n.text}</p>
+											<div class="flex items-center gap-1 shrink-0">
+												<button
+													class="p-1.5 text-slate-500 hover:text-indigo-400 transition-colors rounded-md hover:bg-slate-800/60"
+													onclick={() => { editingNoteId = n.id; }}
+													title="Edit note"
+												>
+													<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
+												</button>
+												<button
+													class="p-1.5 text-slate-500 hover:text-red-400 transition-colors rounded-md hover:bg-slate-800/60"
+													onclick={() => deletePresenterNote(n.id)}
+													title="Delete note"
+												>
+													<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" /></svg>
+												</button>
+											</div>
+										</div>
+									{/if}
+								</div>
+							{/each}
+						{/if}
+					</div>
+					<!-- Add note panel / FAB -->
+					{#if showAddNote}
+						<div class="p-4 border-t border-slate-800 bg-slate-900/60">
+							<textarea
+								class="w-full bg-slate-800 text-sm rounded-lg px-3 py-2 outline-none ring-1 ring-slate-700 focus:ring-indigo-500 placeholder:text-slate-500 resize-none min-h-[60px]"
+								style="color:{newNoteTextColor};text-align:{newNoteAlign};background:{newNoteBgColor !== 'transparent' ? newNoteBgColor : ''}"
+								placeholder="Type your note..."
+								bind:value={newNoteText}
+								onkeydown={(e) => { if (e.key === 'Escape') { showAddNote = false; newNoteText = ''; noteColorTarget = null; } }}
+							></textarea>
+							<div class="flex items-center gap-1 mt-2 flex-wrap">
+								<!-- Alignment -->
+								<div class="flex items-center rounded-lg bg-slate-800/80 p-0.5 gap-0.5">
+									<button class="p-1.5 rounded transition-colors {newNoteAlign === 'left' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white'}" onclick={() => { newNoteAlign = 'left'; }} title="Align left">
+										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17 10H3M21 6H3M21 14H3M17 18H3" /></svg>
+									</button>
+									<button class="p-1.5 rounded transition-colors {newNoteAlign === 'center' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white'}" onclick={() => { newNoteAlign = 'center'; }} title="Align center">
+										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 10H6M21 6H3M21 14H3M18 18H6" /></svg>
+									</button>
+									<button class="p-1.5 rounded transition-colors {newNoteAlign === 'right' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white'}" onclick={() => { newNoteAlign = 'right'; }} title="Align right">
+										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 10H7M21 6H3M21 14H3M21 18H7" /></svg>
+									</button>
+								</div>
+								<!-- Text color -->
+								<div class="relative" data-note-colors>
+									<button
+										class="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium bg-slate-800/80 transition-colors {noteColorTarget?.noteId === 'new' && noteColorTarget?.field === 'textColor' ? 'text-indigo-300 ring-1 ring-indigo-500' : 'text-slate-400 hover:text-white'}"
+										onclick={() => { noteColorTarget = noteColorTarget?.noteId === 'new' && noteColorTarget?.field === 'textColor' ? null : { noteId: 'new', field: 'textColor' }; }}
+										title="Text color"
+									>
+										<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3l6.5 13H5.5L12 3z" /><path d="M3 20h18" stroke={newNoteTextColor} stroke-width="3" /></svg>
+										<span>Text</span>
+									</button>
+									{#if noteColorTarget?.noteId === 'new' && noteColorTarget?.field === 'textColor'}
+										<div class="absolute bottom-full left-0 mb-2 p-2 bg-slate-800 rounded-lg ring-1 ring-slate-700 shadow-xl z-10 grid grid-cols-8 gap-1 w-52" data-note-colors>
+											{#each noteColorSwatches.filter(c => c !== 'transparent') as color}
+												<button
+													class="w-5 h-5 rounded-full ring-1 ring-white/10 hover:ring-white/40 transition-all {newNoteTextColor === color ? 'ring-2 ring-indigo-400 scale-110' : ''}"
+													style="background:{color}"
+													onclick={() => { newNoteTextColor = color; noteColorTarget = null; }}
+												></button>
+											{/each}
+										</div>
+									{/if}
+								</div>
+								<!-- Background color -->
+								<div class="relative" data-note-colors>
+									<button
+										class="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium bg-slate-800/80 transition-colors {noteColorTarget?.noteId === 'new' && noteColorTarget?.field === 'bgColor' ? 'text-indigo-300 ring-1 ring-indigo-500' : 'text-slate-400 hover:text-white'}"
+										onclick={() => { noteColorTarget = noteColorTarget?.noteId === 'new' && noteColorTarget?.field === 'bgColor' ? null : { noteId: 'new', field: 'bgColor' }; }}
+										title="Background color"
+									>
+										<div class="w-3.5 h-3.5 rounded border border-slate-500" style="background:{newNoteBgColor !== 'transparent' ? newNoteBgColor : 'transparent'}"></div>
+										<span>Fill</span>
+									</button>
+									{#if noteColorTarget?.noteId === 'new' && noteColorTarget?.field === 'bgColor'}
+										<div class="absolute bottom-full left-0 mb-2 p-2 bg-slate-800 rounded-lg ring-1 ring-slate-700 shadow-xl z-10 grid grid-cols-8 gap-1 w-52" data-note-colors>
+											{#each noteColorSwatches as color}
+												<button
+													class="w-5 h-5 rounded-full ring-1 ring-white/10 hover:ring-white/40 transition-all {newNoteBgColor === color ? 'ring-2 ring-indigo-400 scale-110' : ''}"
+													style="background:{color === 'transparent' ? 'repeating-conic-gradient(#334155 0% 25%, transparent 0% 50%) 50%/8px 8px' : color}"
+													onclick={() => { newNoteBgColor = color; noteColorTarget = null; }}
+													title={color === 'transparent' ? 'Transparent' : color}
+												></button>
+											{/each}
+										</div>
+									{/if}
+								</div>
+								<div class="flex-1"></div>
+								<button
+									class="px-2 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
+									onclick={() => { showAddNote = false; newNoteText = ''; noteColorTarget = null; }}
+								>Cancel</button>
+								<button
+									class="px-4 py-1.5 rounded-lg text-xs font-medium bg-indigo-500 text-white hover:bg-indigo-400 transition-colors"
+									onclick={addPresenterNote}
+								>Add</button>
+							</div>
+						</div>
+					{:else}
+						<div class="absolute bottom-6 right-6">
+							<button
+								class="w-12 h-12 rounded-full bg-indigo-500 hover:bg-indigo-400 text-white shadow-lg shadow-indigo-500/30 flex items-center justify-center transition-colors"
+								onclick={() => { showAddNote = true; }}
+								title="Add note"
+							>
+								<svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+							</button>
+						</div>
+					{/if}
+				</div>
+			{/if}
+		</div>
+
+		<!-- Bottom navigation -->
+		<div class="h-16 flex items-center justify-around bg-slate-900 border-t border-slate-800 shrink-0">
+			<button
+				class="flex flex-col items-center gap-1 px-6 py-1.5 rounded-lg transition-colors {presenterTab === 'presentation' ? 'text-indigo-400' : 'text-slate-500 hover:text-slate-300'}"
+				onclick={() => { presenterTab = 'presentation'; }}
+			>
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+					<rect x="2" y="3" width="20" height="14" rx="2" />
+					<path d="M8 21h8" />
+					<path d="M12 17v4" />
+				</svg>
+				<span class="text-[11px] font-medium">Presentation</span>
+			</button>
+			<button
+				class="relative flex flex-col items-center gap-1 px-6 py-1.5 rounded-lg transition-colors {presenterTab === 'questions' ? 'text-indigo-400' : 'text-slate-500 hover:text-slate-300'}"
+				onclick={() => { presenterTab = 'questions'; }}
+			>
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+					<circle cx="12" cy="12" r="10" />
+					<path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3" />
+					<path d="M12 17h.01" />
+				</svg>
+				<span class="text-[11px] font-medium">Questions</span>
+				{#if presenterQuestions.filter(q => !q.answered).length > 0}
+					<span class="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">{presenterQuestions.filter(q => !q.answered).length}</span>
+				{/if}
+			</button>
+			<button
+				class="flex flex-col items-center gap-1 px-6 py-1.5 rounded-lg transition-colors {presenterTab === 'notes' ? 'text-indigo-400' : 'text-slate-500 hover:text-slate-300'}"
+				onclick={() => { presenterTab = 'notes'; }}
+			>
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+					<path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+					<path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+				</svg>
+				<span class="text-[11px] font-medium">Notes</span>
+			</button>
+		</div>
+	</div>
+{/if}
+
+<style>
+	/* Presentation transition animations */
+	:global(.pres-anim-fade) {
+		animation: pres-fade ease-out both;
+	}
+	:global(.pres-anim-dissolve) {
+		animation: pres-dissolve ease-in-out both;
+	}
+	:global(.pres-anim-flip) {
+		animation: pres-flip ease-in-out both;
+	}
+	:global(.pres-anim-slide-left) {
+		animation: pres-slide-left ease-out both;
+	}
+	:global(.pres-anim-slide-right) {
+		animation: pres-slide-right ease-out both;
+	}
+
+	@keyframes pres-fade {
+		from { opacity: 0; }
+		to { opacity: 1; }
+	}
+	@keyframes pres-dissolve {
+		0% { opacity: 0; filter: blur(8px); }
+		100% { opacity: 1; filter: blur(0); }
+	}
+	@keyframes pres-flip {
+		0% { transform: perspective(1200px) rotateY(-90deg); opacity: 0; }
+		100% { transform: perspective(1200px) rotateY(0deg); opacity: 1; }
+	}
+	@keyframes pres-slide-left {
+		from { transform: translateX(-100%); opacity: 0; }
+		to { transform: translateX(0); opacity: 1; }
+	}
+	@keyframes pres-slide-right {
+		from { transform: translateX(100%); opacity: 0; }
+		to { transform: translateX(0); opacity: 1; }
+	}
+</style>

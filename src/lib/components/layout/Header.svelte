@@ -9,7 +9,7 @@
 	let { title, description = '' }: Props = $props();
 </script>
 
-<header class="border-b border-slate-800 bg-slate-900/50 backdrop-blur-sm px-8 py-5 flex items-center gap-4">
+<header class="sticky top-0 z-10 border-b border-slate-800 bg-slate-900/80 backdrop-blur-sm px-8 py-5 flex items-center gap-4">
 	<button
 		class="md:hidden p-1.5 -ml-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
 		onclick={() => sidebar.toggle()}

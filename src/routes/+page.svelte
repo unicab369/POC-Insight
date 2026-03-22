@@ -10,6 +10,12 @@
 	import { revenueVsExpenses, financialStats } from '$lib/data/financial';
 </script>
 
+<svelte:head>
+	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+</svelte:head>
+
+<svelte:document onwheel={(e) => { if (e.ctrlKey || e.metaKey) e.preventDefault(); }} />
+
 <Header title="Dashboard" description="Overview of key metrics and trends" />
 
 <div class="p-8 space-y-6">
