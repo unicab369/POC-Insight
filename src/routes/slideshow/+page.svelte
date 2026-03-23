@@ -18,6 +18,7 @@
 		textColor?: string;
 		highlight?: string;
 		bgColor?: string;
+		zIndex?: number;
 	}
 
 	interface SlideImage {
@@ -28,6 +29,7 @@
 		y: number;
 		width: number;
 		height: number;
+		zIndex?: number;
 	}
 
 	interface SlideShape {
@@ -49,6 +51,7 @@
 		underline?: boolean;
 		align?: 'left' | 'center' | 'right';
 		highlight?: string;
+		zIndex?: number;
 	}
 
 	interface TableCell {
@@ -70,6 +73,7 @@
 		rows: number; cols: number;
 		cells: TableCell[][];
 		borderColor: string;
+		zIndex?: number;
 	}
 
 	interface Slide {
@@ -86,6 +90,8 @@
 		bgImage?: string;
 		animationType?: 'fade' | 'dissolve' | 'flip' | 'slide-left' | 'slide-right';
 		animationSpeed?: number;
+		advanceMode?: 'click' | 'timer';
+		advanceDuration?: number;
 	}
 
 	const STORAGE_KEY = 'poc-slideshow';
@@ -105,6 +111,7 @@
 	let nextTextboxId = $state(saved?.nextTextboxId ?? 1);
 	let nextShapeId = $state(saved?.nextShapeId ?? 1);
 	let nextTableId = $state(saved?.nextTableId ?? 1);
+	let nextZIndex = $state(saved?.nextZIndex ?? 1);
 	let slides = $state<Slide[]>(
 		saved?.slides ?? (() => {
 			const tb1Id = nextTextboxId++;
@@ -148,6 +155,7 @@
 			nextTextboxId,
 			nextShapeId,
 			nextTableId,
+			nextZIndex,
 			presenterQuestions: $state.snapshot(presenterQuestions),
 			presenterNotes: $state.snapshot(presenterNotes),
 			nextPresenterQId,
@@ -202,14 +210,54 @@
 	let showAnimationPicker = $state(false);
 	let showAnimPreview = $state(false);
 	let animPreviewKey = $state(0);
+	let previewCountdown = $state<number | null>(null);
+	let prevPreviewSlide = $state<Slide | null>(null);
+
+	// Preview auto-advance countdown
+	$effect(() => {
+		if (!showAnimPreview) { previewCountdown = null; return; }
+		const slide = slides.find(s => s.id === selectedSlideId);
+		if (!slide || slide.advanceMode !== 'timer') { previewCountdown = null; return; }
+		// Re-run when animPreviewKey changes (replay / slide change)
+		const _key = animPreviewKey;
+		const total = Math.ceil((slide.advanceDuration ?? 5000) / 1000);
+		previewCountdown = total;
+		const interval = setInterval(() => {
+			if (previewCountdown !== null && previewCountdown > 1) {
+				previewCountdown--;
+			} else {
+				clearInterval(interval);
+				// Auto-advance to next slide in preview
+				const idx = slides.findIndex(s => s.id === selectedSlideId);
+				if (idx < slides.length - 1) {
+					const currentSlide = slides[idx];
+					const nextSlide = slides[idx + 1];
+					const speed = nextSlide?.animationSpeed ?? 500;
+					if (nextSlide?.animationType) {
+						prevPreviewSlide = structuredClone($state.snapshot(currentSlide)) as Slide;
+						setTimeout(() => { prevPreviewSlide = null; }, speed);
+					}
+					selectedSlideId = slides[idx + 1].id;
+					animPreviewKey++;
+				} else {
+					previewCountdown = null;
+				}
+			}
+		}, 1000);
+		return () => { clearInterval(interval); previewCountdown = null; };
+	});
 
 	// Presentation transition state
 	let presentationTransition = $state<string | null>(null);
 	let presentationTransitionSpeed = $state(500);
+	let prevPresentationSlide = $state<Slide | null>(null);
 
 	// Presentation mode state
 	let presentationMode = $state(false);
 	let presentationSlideIndex = $state(0);
+
+	// Auto-advance countdown display
+	let autoAdvanceCountdown = $state<number | null>(null);
 	let presentationEl = $state<HTMLDivElement | null>(null);
 
 	// Presenter mode state
@@ -222,20 +270,30 @@
 
 	// Presenter questions & notes (persisted)
 	interface PresenterQuestion { id: number; text: string; answered?: boolean; }
-	interface PresenterNote { id: number; text: string; align?: 'left' | 'center' | 'right'; textColor?: string; bgColor?: string; }
+	interface PresenterNote { id: number; title: string; description: string; align?: 'left' | 'center' | 'right'; textColor?: string; bgColor?: string; }
 	let presenterQuestions = $state<PresenterQuestion[]>(saved?.presenterQuestions ?? []);
 	let presenterNotes = $state<PresenterNote[]>(saved?.presenterNotes ?? []);
+	// Migrate old notes: `text` → `title` + `description`
+	for (const n of presenterNotes) {
+		if ((n as any).text !== undefined && !('title' in n)) {
+			(n as any).title = (n as any).text;
+			(n as any).description = '';
+			delete (n as any).text;
+		}
+	}
 	let nextPresenterQId = $state(saved?.nextPresenterQId ?? 1);
 	let nextPresenterNId = $state(saved?.nextPresenterNId ?? 1);
 	let showAddQuestion = $state(false);
 	let newQuestionText = $state('');
 	let showAddNote = $state(false);
+	let newNoteTitle = $state('');
 	let newNoteText = $state('');
 	let newNoteAlign = $state<'left' | 'center' | 'right'>('left');
 	let newNoteTextColor = $state('#e2e8f0');
 	let newNoteBgColor = $state('transparent');
 	let editingQuestionId = $state<number | null>(null);
 	let editingNoteId = $state<number | null>(null);
+	let expandedNoteId = $state<number | null>(null);
 	let noteColorTarget = $state<{ noteId: number | 'new'; field: 'textColor' | 'bgColor' } | null>(null);
 
 	const noteColorSwatches = [
@@ -284,13 +342,15 @@
 		const anim = targetSlide?.animationType;
 		const speed = targetSlide?.animationSpeed ?? 500;
 		if (!anim) {
+			prevPresentationSlide = null;
 			presentationSlideIndex = targetIndex;
 			return;
 		}
+		prevPresentationSlide = structuredClone($state.snapshot(slides[presentationSlideIndex])) as Slide;
 		presentationTransition = anim;
 		presentationTransitionSpeed = speed;
 		presentationSlideIndex = targetIndex;
-		setTimeout(() => { presentationTransition = null; }, speed);
+		setTimeout(() => { presentationTransition = null; prevPresentationSlide = null; }, speed);
 	}
 
 	function presentationNext() {
@@ -304,6 +364,33 @@
 		while (prev >= 0 && slides[prev]?.skipped) prev--;
 		if (prev >= 0) triggerPresentationTransition(prev);
 	}
+
+	// Auto-advance timer for presentation mode
+	$effect(() => {
+		if (!presentationMode) return;
+		const slide = slides[presentationSlideIndex];
+		if (!slide || slide.advanceMode !== 'timer') return;
+		const duration = slide.advanceDuration ?? 5000;
+		const timer = setTimeout(() => {
+			presentationNext();
+		}, duration);
+		return () => clearTimeout(timer);
+	});
+
+	// Auto-advance countdown display
+	$effect(() => {
+		if (!presentationMode) { autoAdvanceCountdown = null; return; }
+		const slide = slides[presentationSlideIndex];
+		if (!slide || slide.advanceMode !== 'timer') { autoAdvanceCountdown = null; return; }
+		const total = Math.ceil((slide.advanceDuration ?? 5000) / 1000);
+		autoAdvanceCountdown = total;
+		const interval = setInterval(() => {
+			autoAdvanceCountdown = autoAdvanceCountdown !== null && autoAdvanceCountdown > 1
+				? autoAdvanceCountdown - 1
+				: null;
+		}, 1000);
+		return () => { clearInterval(interval); autoAdvanceCountdown = null; };
+	});
 
 	// Presenter mode functions
 	function startPresenter() {
@@ -326,6 +413,7 @@
 		showAddQuestion = false;
 		showAddNote = false;
 		newQuestionText = '';
+		newNoteTitle = '';
 		newNoteText = '';
 	}
 
@@ -380,15 +468,17 @@
 	}
 
 	function addPresenterNote() {
-		const text = newNoteText.trim();
-		if (!text) return;
+		const title = newNoteTitle.trim();
+		if (!title) return;
 		presenterNotes.push({
 			id: nextPresenterNId++,
-			text,
+			title,
+			description: newNoteText.trim(),
 			align: newNoteAlign,
 			textColor: newNoteTextColor,
 			bgColor: newNoteBgColor
 		});
+		newNoteTitle = '';
 		newNoteText = '';
 		newNoteAlign = 'left';
 		newNoteTextColor = '#e2e8f0';
@@ -1160,7 +1250,7 @@
 			const w = 30, h = 12;
 			const x = Math.max(0, Math.min(pos.x - w / 2, 100 - w));
 			const y = Math.max(0, Math.min(pos.y - h / 2, 100 - h));
-			selectedSlide.textboxes.push({ id, x, y, width: w, height: h, text: '' });
+			selectedSlide.textboxes.push({ id, x, y, width: w, height: h, text: '', zIndex: nextZIndex++ });
 			selectedTextboxId = id;
 			editingTextboxId = id;
 			showFormattingToolbar = true;
@@ -1176,7 +1266,7 @@
 			const size = 20;
 			const x = Math.max(0, Math.min(pos.x - size / 2, 100 - size));
 			const y = Math.max(0, Math.min(pos.y - size / 2, 100 - size));
-			selectedSlide.images.push({ id, src: '', name: '', x, y, width: size, height: size });
+			selectedSlide.images.push({ id, src: '', name: '', x, y, width: size, height: size, zIndex: nextZIndex++ });
 			selectedImageId = id;
 			activeImageId = id;
 			selectedTextboxId = null;
@@ -1202,7 +1292,8 @@
 				borderColor: '#6366f1',
 				borderWidth: 2,
 				textColor: '#ffffff',
-				fontSize: 14
+				fontSize: 14,
+				zIndex: nextZIndex++
 			});
 			selectedShapeId = id;
 			selectedTextboxId = null;
@@ -1230,9 +1321,15 @@
 		drawCurrent = null;
 	}
 
+	function bringToFront(element: { zIndex?: number }) {
+		element.zIndex = nextZIndex++;
+	}
+
 	function selectTextbox(id: number, e: MouseEvent) {
 		e.stopPropagation();
 		if (activeTool) return;
+		const tb = selectedSlide?.textboxes.find(t => t.id === id);
+		if (tb && !tb.role) bringToFront(tb);
 		selectedTextboxId = id;
 		activePickerTarget = null;
 
@@ -1254,6 +1351,8 @@
 	function selectImage(id: number, e: MouseEvent) {
 		e.stopPropagation();
 		if (activeTool) return;
+		const img = selectedSlide?.images.find(i => i.id === id);
+		if (img) bringToFront(img);
 		selectedImageId = id;
 		activeImageId = id;
 		selectedTextboxId = null;
@@ -1328,6 +1427,8 @@
 	function selectShape(id: number, e: MouseEvent) {
 		e.stopPropagation();
 		if (activeTool) return;
+		const sh = selectedSlide?.shapes.find(s => s.id === id);
+		if (sh) bringToFront(sh);
 		selectedShapeId = id;
 		editingShapeId = null;
 		activePickerTarget = null;
@@ -1482,7 +1583,7 @@
 			}
 			cells.push(row);
 		}
-		selectedSlide.tables.push({ id, x, y, width: w, height: h, rows, cols, cells, borderColor: '#475569' });
+		selectedSlide.tables.push({ id, x, y, width: w, height: h, rows, cols, cells, borderColor: '#475569', zIndex: nextZIndex++ });
 		selectedTableId = id;
 		editingTableId = null;
 		selectedCellRow = null;
@@ -1503,6 +1604,8 @@
 	function selectTable(id: number, e: MouseEvent | PointerEvent) {
 		e.stopPropagation();
 		if (activeTool) return;
+		const tbl = selectedSlide?.tables.find(t => t.id === id);
+		if (tbl) bringToFront(tbl);
 		selectedTableId = id;
 		editingTableId = null;
 		selectedCellRow = null;
@@ -1939,6 +2042,14 @@
 		if (showAnimationPicker && !target.closest('[data-anim-picker]')) {
 			showAnimationPicker = false;
 		}
+		// Deselect elements when clicking outside element + toolbar
+		if (selectedTextboxId != null || selectedImageId != null || selectedShapeId != null || selectedTableId != null) {
+			const onElement = target.closest('[data-textbox]') || target.closest('[data-image]') || target.closest('[data-shape]') || target.closest('[data-table]');
+			const onToolbar = target.closest('[data-toolbar]');
+			if (!onElement && !onToolbar) {
+				deselectAll();
+			}
+		}
 	}}
 	onkeydown={(e) => {
 		// Presentation mode controls
@@ -2013,7 +2124,7 @@
 <!-- Fullscreen overlay -->
 <div class="fixed inset-0 z-[100] flex flex-col bg-slate-950">
 	<!-- Top Toolbar (full width) -->
-	<div class="shrink-0 bg-slate-900 border-b border-slate-800 overflow-visible relative z-[110]">
+	<div class="shrink-0 bg-slate-900 border-b border-slate-600 overflow-visible relative z-[110]">
 	<div class="h-12 flex items-center px-3 gap-1">
 		<!-- Close button -->
 		<button
@@ -2333,6 +2444,43 @@
 									<span>Slow</span>
 								</div>
 							</div>
+						{/if}
+						<!-- Advance behavior -->
+						<div>
+							<label class="text-xs text-slate-300 mb-1 block">Advance</label>
+							<div class="flex rounded-lg overflow-hidden border border-slate-600">
+								<button
+									class="flex-1 text-xs py-1.5 text-center transition-colors {(selectedSlide.advanceMode ?? 'click') === 'click' ? 'bg-indigo-500/20 text-indigo-400' : 'bg-slate-700 text-slate-400 hover:text-slate-200'}"
+									onclick={(e) => { e.stopPropagation(); saveHistory(); selectedSlide!.advanceMode = 'click'; }}
+								>On Click</button>
+								<button
+									class="flex-1 text-xs py-1.5 text-center transition-colors {selectedSlide.advanceMode === 'timer' ? 'bg-indigo-500/20 text-indigo-400' : 'bg-slate-700 text-slate-400 hover:text-slate-200'}"
+									onclick={(e) => { e.stopPropagation(); saveHistory(); selectedSlide!.advanceMode = 'timer'; }}
+								>After Duration</button>
+							</div>
+						</div>
+						{#if selectedSlide.advanceMode === 'timer'}
+							<div class="flex items-center gap-2">
+								<label class="text-xs text-slate-300">Duration</label>
+								<input
+									type="number"
+									min="1"
+									max="999"
+									step="1"
+									value={(selectedSlide.advanceDuration ?? 5000) / 1000}
+									onchange={(e) => {
+										saveHistory();
+										const val = Math.max(1, parseFloat((e.target as HTMLInputElement).value) || 5);
+										selectedSlide!.advanceDuration = Math.round(val * 1000);
+										(e.target as HTMLInputElement).value = String(val);
+									}}
+									onclick={(e) => e.stopPropagation()}
+									class="w-16 bg-slate-700 border border-slate-600 rounded-lg px-2 py-1 text-sm text-slate-200 text-center focus:outline-none focus:border-indigo-500"
+								/>
+								<span class="text-xs text-slate-500">seconds</span>
+							</div>
+						{/if}
+						{#if selectedSlide.animationType}
 							<button
 								class="w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500/30 transition-colors"
 								onclick={(e) => { e.stopPropagation(); showAnimPreview = true; animPreviewKey++; }}
@@ -2452,7 +2600,7 @@
 	<!-- Body: Sidebar + Slide Content -->
 	<div class="flex flex-1 min-h-0">
 	<!-- Left Panel: Slide Thumbnails -->
-	<div class="w-56 shrink-0 bg-slate-900 border-r border-slate-800 flex flex-col">
+	<div class="w-56 shrink-0 bg-slate-900 border-r border-slate-600 flex flex-col">
 
 		<div class="flex-1 overflow-y-auto p-3 space-y-3">
 			{#each slides as slide, i}
@@ -2621,7 +2769,7 @@
 			{/each}
 		</div>
 
-		<div class="p-3 border-t border-slate-800">
+		<div class="p-3 border-t border-slate-600">
 			<button
 				class="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-slate-400 hover:text-indigo-400 hover:bg-slate-800 transition-colors"
 				onclick={addSlide}
@@ -2660,9 +2808,9 @@
 						data-textbox-id={tb.id}
 						data-textbox-role={tb.role ?? undefined}
 						class="absolute border-2 rounded transition-colors touch-none {selectedTextboxId === tb.id
-							? editingTextboxId === tb.id ? 'border-indigo-500 shadow-lg shadow-indigo-500/10 z-20' : 'border-indigo-500 shadow-lg shadow-indigo-500/10'
+							? 'border-indigo-500 shadow-lg shadow-indigo-500/10'
 							: tb.role ? 'border-slate-700 hover:border-slate-600' : 'border-slate-600 hover:border-slate-500'}"
-						style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%;background:{tb.bgColor ?? 'transparent'};{tb.role && activeTool ? 'pointer-events:none' : ''}"
+						style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%;background:{tb.bgColor ?? 'transparent'};z-index:{tb.role ? 0 : (tb.zIndex ?? 0)};{tb.role && activeTool ? 'pointer-events:none' : ''}"
 						role="button"
 						tabindex="0"
 						onpointerdown={(e) => {
@@ -2760,11 +2908,11 @@
 						data-image
 						data-image-id={image.id}
 						class="absolute rounded transition-colors touch-none {selectedImageId === image.id
-							? activeImageId === image.id ? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10 z-20' : 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10'
+							? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10'
 							: image.src === ''
 								? 'border-2 border-dashed border-slate-600 hover:border-slate-500'
 								: 'border-2 border-slate-600 hover:border-slate-500'}"
-						style="left:{image.x}%;top:{image.y}%;width:{image.width}%;height:{image.height}%"
+						style="left:{image.x}%;top:{image.y}%;width:{image.width}%;height:{image.height}%;z-index:{image.zIndex ?? 0}"
 						role="button"
 						tabindex="0"
 						onpointerdown={(e) => {
@@ -2831,9 +2979,9 @@
 						data-shape
 						data-shape-id={shape.id}
 						class="absolute transition-colors touch-none {selectedShapeId === shape.id
-							? editingShapeId === shape.id ? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10 z-20' : 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10'
+							? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10'
 							: 'hover:ring-1 hover:ring-slate-500'}"
-						style="left:{shape.x}%;top:{shape.y}%;width:{shape.width}%;height:{shape.height}%"
+						style="left:{shape.x}%;top:{shape.y}%;width:{shape.width}%;height:{shape.height}%;z-index:{shape.zIndex ?? 0}"
 						role="button"
 						tabindex="0"
 						onpointerdown={(e) => {
@@ -2938,9 +3086,9 @@
 						data-table
 						data-table-id={table.id}
 						class="absolute transition-colors touch-none {selectedTableId === table.id
-							? editingTableId === table.id ? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10 z-20' : 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10'
+							? 'ring-2 ring-indigo-500 shadow-lg shadow-indigo-500/10'
 							: 'hover:ring-1 hover:ring-slate-500'}"
-						style="left:{table.x}%;top:{table.y}%;width:{table.width}%;height:{table.height}%"
+						style="left:{table.x}%;top:{table.y}%;width:{table.width}%;height:{table.height}%;z-index:{table.zIndex ?? 0}"
 						role="button"
 						tabindex="0"
 						use:tablePointerAction={table.id}
@@ -3505,12 +3653,15 @@
 {/if}
 
 <!-- Animation Preview Window -->
-{#if showAnimPreview && selectedSlide?.animationType}
+{#if showAnimPreview && selectedSlide}
 	{@const ps = selectedSlide}
-	<div class="fixed bottom-6 right-6 z-[150] w-[420px] bg-slate-900 border border-slate-700 rounded-xl shadow-2xl shadow-black/50 overflow-hidden">
+	{@const currentIdx = slides.findIndex(s => s.id === selectedSlideId)}
+	{@const hasNext = currentIdx < slides.length - 1}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div data-anim-picker class="fixed bottom-6 right-6 z-[150] w-[420px] bg-slate-900 border border-slate-700 rounded-xl shadow-2xl shadow-black/50 overflow-hidden" onclick={(e) => e.stopPropagation()}>
 		<!-- Header -->
 		<div class="flex items-center justify-between px-3 py-2 bg-slate-800 border-b border-slate-700">
-			<span class="text-xs font-medium text-slate-300">Animation Preview</span>
+			<span class="text-xs font-medium text-slate-300">Animation Preview — {currentIdx + 1}/{slides.length}</span>
 			<div class="flex items-center gap-1.5">
 				<button
 					class="w-6 h-6 rounded-full flex items-center justify-center text-indigo-400 hover:bg-indigo-500/20 transition-colors"
@@ -3521,21 +3672,78 @@
 				</button>
 				<button
 					class="w-6 h-6 rounded-full flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
-					onclick={() => { showAnimPreview = false; }}
+					onclick={() => { showAnimPreview = false; prevPreviewSlide = null; }}
 					title="Close"
 				>
 					<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12" /></svg>
 				</button>
 			</div>
 		</div>
-		<!-- Preview area -->
-		<div class="p-3 bg-black/30">
-			{#key animPreviewKey}
-				<div
-					class="w-full aspect-[16/10] rounded-lg overflow-hidden bg-slate-900 relative pres-anim-{ps.animationType}"
-					style="animation-duration:{ps.animationSpeed ?? 500}ms;{ps.bgColor ? `background-color:${ps.bgColor}` : ''}{ps.bgImage ? `;background-image:url(${ps.bgImage});background-size:cover;background-position:center` : ''}"
-				>
-					<!-- Textboxes -->
+		<!-- Preview area (click to advance to next slide) -->
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div
+			class="p-3 bg-black/30 {hasNext ? 'cursor-pointer' : ''}"
+			onclick={() => {
+				if (!hasNext) return;
+				const currentSlide = slides[currentIdx];
+				const nextSlide = slides[currentIdx + 1];
+				const speed = nextSlide?.animationSpeed ?? 500;
+				if (nextSlide?.animationType) {
+					prevPreviewSlide = structuredClone($state.snapshot(currentSlide)) as Slide;
+					setTimeout(() => { prevPreviewSlide = null; }, speed);
+				}
+				selectedSlideId = slides[currentIdx + 1].id;
+				animPreviewKey++;
+			}}
+		>
+			<div class="relative w-full aspect-[16/10] rounded-lg overflow-hidden bg-slate-900">
+				<!-- Previous slide (static background during transition) -->
+				{#if prevPreviewSlide}
+					{@const prev = prevPreviewSlide}
+					<div class="absolute inset-0 overflow-hidden" style="{prev.bgColor ? `background-color:${prev.bgColor}` : ''}{prev.bgImage ? `;background-image:url(${prev.bgImage});background-size:cover;background-position:center` : ''}">
+						{#each prev.textboxes as tb}
+							<div class="absolute overflow-hidden" style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%;background:{tb.bgColor && tb.bgColor !== 'transparent' ? tb.bgColor : 'transparent'}">
+								<div class="p-px whitespace-pre-wrap break-words" style="font-family:{tb.fontFamily ?? 'sans-serif'};font-size:6px;font-weight:{tb.bold ? 'bold' : 'normal'};font-style:{tb.italic ? 'italic' : 'normal'};text-decoration:{tb.underline ? 'underline' : 'none'};text-align:{tb.align ?? 'left'};color:{tb.textColor ?? '#ffffff'};background:{tb.highlight ?? 'transparent'};line-height:1.2">{tb.text}</div>
+							</div>
+						{/each}
+						{#each prev.images as img}
+							<div class="absolute overflow-hidden rounded-sm" style="left:{img.x}%;top:{img.y}%;width:{img.width}%;height:{img.height}%">
+								{#if img.src !== ''}<img src={img.src} alt={img.name} class="w-full h-full object-cover" />{/if}
+							</div>
+						{/each}
+						{#each (prev.shapes ?? []) as sh}
+							<div class="absolute overflow-hidden" style="left:{sh.x}%;top:{sh.y}%;width:{sh.width}%;height:{sh.height}%">
+								<svg class="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+									{#if sh.type === 'circle'}<ellipse cx="50" cy="50" rx="48" ry="48" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+									{:else if sh.type === 'triangle'}<polygon points="50,2 98,98 2,98" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+									{:else if sh.type === 'diamond'}<polygon points="50,2 98,50 50,98 2,50" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+									{:else if sh.type === 'star'}<polygon points="50,5 61,35 95,35 68,57 79,90 50,70 21,90 32,57 5,35 39,35" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+									{:else if sh.type === 'rounded-square'}<rect x="2" y="2" width="96" height="96" rx="12" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+									{:else if sh.type === 'line'}<line x1="5" y1="95" x2="95" y2="5" stroke={sh.borderColor} stroke-width="4" />
+									{:else if sh.type === 'arrow'}<line x1="5" y1="95" x2="90" y2="10" stroke={sh.borderColor} stroke-width="4" /><polygon points="82,0 100,0 100,18" fill={sh.borderColor} />
+									{:else}<rect x="2" y="2" width="96" height="96" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="4" />
+									{/if}
+								</svg>
+								{#if sh.text}
+									<div class="absolute inset-0 flex items-center justify-center p-px" style="font-size:5px;color:{sh.textColor};text-align:{sh.align ?? 'center'};font-weight:{sh.bold ? 'bold' : 'normal'};line-height:1.2">{sh.text}</div>
+								{/if}
+							</div>
+						{/each}
+						{#each (prev.tables ?? []) as tbl}
+							<div class="absolute overflow-hidden" style="left:{tbl.x}%;top:{tbl.y}%;width:{tbl.width}%;height:{tbl.height}%">
+								<table class="w-full h-full" style="border-collapse:collapse;table-layout:fixed">
+									{#each tbl.cells as row}<tr>{#each row as c}<td class="border border-slate-600/50" style="font-size:5px;color:{c.textColor ?? '#ffffff'};background:{c.bgColor ?? 'transparent'};padding:0 1px;line-height:1.2;vertical-align:top">{c.text}</td>{/each}</tr>{/each}
+								</table>
+							</div>
+						{/each}
+					</div>
+				{/if}
+				{#key animPreviewKey}
+					<div
+						class="absolute inset-0 overflow-hidden {ps.animationType ? `pres-anim-${ps.animationType}` : ''}"
+						style="animation-duration:{ps.animationSpeed ?? 500}ms;{ps.bgColor ? `background-color:${ps.bgColor}` : ''}{ps.bgImage ? `;background-image:url(${ps.bgImage});background-size:cover;background-position:center` : ''}"
+					>
+						<!-- Textboxes -->
 					{#each ps.textboxes as tb}
 						<div
 							class="absolute overflow-hidden"
@@ -3603,8 +3811,16 @@
 							</table>
 						</div>
 					{/each}
+					<!-- Timer countdown -->
+					{#if previewCountdown !== null}
+						<div class="absolute bottom-1.5 left-2 flex items-center gap-1 text-white/50 text-[10px] font-medium">
+							<svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><polyline points="12,6 12,12 16,14" /></svg>
+							{previewCountdown}s
+						</div>
+					{/if}
 				</div>
-			{/key}
+				{/key}
+			</div>
 		</div>
 	</div>
 {/if}
@@ -3619,10 +3835,56 @@
 		onclick={presentationNext}
 	>
 		{#if slide}
+			<!-- Previous slide (static background during transition) -->
+			{#if prevPresentationSlide && presentationTransition}
+				{@const prev = prevPresentationSlide}
+				<div
+					class="absolute w-full max-h-full"
+					style="aspect-ratio:16/10;max-width:min(100vw, calc(100vh * 16 / 10));max-height:min(100vh, calc(100vw * 10 / 16))"
+				>
+					<div class="absolute inset-0 bg-slate-900 overflow-hidden" style="{prev.bgColor ? `background-color:${prev.bgColor}` : ''}{prev.bgImage ? `;background-image:url(${prev.bgImage});background-size:cover;background-position:center` : ''}">
+						{#each prev.textboxes as tb}
+							<div class="absolute overflow-hidden" style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%;background:{tb.bgColor && tb.bgColor !== 'transparent' ? tb.bgColor : 'transparent'}">
+								<div class="p-2 whitespace-pre-wrap break-words" style="font-family:{tb.fontFamily ?? 'sans-serif'};font-size:{tb.fontSize ?? 16}px;font-weight:{tb.bold ? 'bold' : 'normal'};font-style:{tb.italic ? 'italic' : 'normal'};text-decoration:{tb.underline ? 'underline' : 'none'};text-align:{tb.align ?? 'left'};color:{tb.textColor ?? '#ffffff'};background:{tb.highlight ?? 'transparent'};line-height:1.4">{tb.text}</div>
+							</div>
+						{/each}
+						{#each prev.images as img}
+							<div class="absolute overflow-hidden rounded" style="left:{img.x}%;top:{img.y}%;width:{img.width}%;height:{img.height}%">
+								{#if img.src !== ''}<img src={img.src} alt={img.name} class="w-full h-full object-cover" />{/if}
+							</div>
+						{/each}
+						{#each (prev.shapes ?? []) as sh}
+							<div class="absolute overflow-hidden" style="left:{sh.x}%;top:{sh.y}%;width:{sh.width}%;height:{sh.height}%">
+								<svg class="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+									{#if sh.type === 'circle'}<ellipse cx="50" cy="50" rx="48" ry="48" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+									{:else if sh.type === 'triangle'}<polygon points="50,2 98,98 2,98" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+									{:else if sh.type === 'diamond'}<polygon points="50,2 98,50 50,98 2,50" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+									{:else if sh.type === 'star'}<polygon points="50,5 61,35 95,35 68,57 79,90 50,70 21,90 32,57 5,35 39,35" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+									{:else if sh.type === 'rounded-square'}<rect x="2" y="2" width="96" height="96" rx="12" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+									{:else if sh.type === 'line'}<line x1="0" y1="50" x2="100" y2="50" stroke={sh.borderColor} stroke-width="2" />
+									{:else if sh.type === 'arrow'}<line x1="0" y1="50" x2="90" y2="50" stroke={sh.borderColor} stroke-width="2" /><polygon points="85,35 100,50 85,65" fill={sh.borderColor} />
+									{:else}<rect x="2" y="2" width="96" height="96" fill={sh.fillColor} stroke={sh.borderColor} stroke-width="2" />
+									{/if}
+								</svg>
+								{#if sh.text}
+									<div class="absolute inset-0 flex items-center justify-center p-2" style="font-size:{sh.fontSize}px;color:{sh.textColor};text-align:{sh.align ?? 'center'};font-weight:{sh.bold ? 'bold' : 'normal'};font-style:{sh.italic ? 'italic' : 'normal'};line-height:1.3">{sh.text}</div>
+								{/if}
+							</div>
+						{/each}
+						{#each (prev.tables ?? []) as tbl}
+							<div class="absolute overflow-hidden" style="left:{tbl.x}%;top:{tbl.y}%;width:{tbl.width}%;height:{tbl.height}%">
+								<table class="w-full h-full" style="border-collapse:collapse;table-layout:fixed">
+									{#each tbl.cells as row}<tr>{#each row as c}<td class="border border-slate-600" style="font-size:{c.fontSize ?? 14}px;color:{c.textColor ?? '#ffffff'};background:{c.bgColor ?? 'transparent'};padding:4px 8px;line-height:1.4;vertical-align:top;font-weight:{c.bold ? 'bold' : 'normal'};font-style:{c.italic ? 'italic' : 'normal'};text-align:{c.align ?? 'left'}">{c.text}</td>{/each}</tr>{/each}
+								</table>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
 			{#key presentationSlideIndex}
 			<div
-				class="relative w-full h-full max-h-screen {presentationTransition ? `pres-anim-${presentationTransition}` : ''}"
-				style="aspect-ratio:16/10;max-width:calc(100vh * 16 / 10);{presentationTransition ? `animation-duration:${presentationTransitionSpeed}ms` : ''}"
+				class="relative w-full max-h-full {presentationTransition ? `pres-anim-${presentationTransition}` : ''}"
+				style="aspect-ratio:16/10;max-width:min(100vw, calc(100vh * 16 / 10));max-height:min(100vh, calc(100vw * 10 / 16));{presentationTransition ? `animation-duration:${presentationTransitionSpeed}ms` : ''}"
 			>
 				<div class="absolute inset-0 bg-slate-900 overflow-hidden" style="{slide.bgColor ? `background-color:${slide.bgColor}` : ''}{slide.bgImage ? `;background-image:url(${slide.bgImage});background-size:cover;background-position:center` : ''}">
 					<!-- Textboxes -->
@@ -3700,8 +3962,14 @@
 			<!-- Slide counter (non-skipped slides only) -->
 			{@const nonSkipped = slides.filter(s => !s.skipped)}
 			{@const posInNonSkipped = nonSkipped.indexOf(slide) + 1}
-			<div class="absolute bottom-4 left-6 text-white/40 text-sm font-medium">
-				{posInNonSkipped > 0 ? posInNonSkipped : presentationSlideIndex + 1} / {nonSkipped.length}
+			<div class="absolute bottom-4 left-6 flex items-center gap-3 text-white/40 text-sm font-medium">
+				<span>{posInNonSkipped > 0 ? posInNonSkipped : presentationSlideIndex + 1} / {nonSkipped.length}</span>
+				{#if autoAdvanceCountdown !== null}
+					<span class="flex items-center gap-1 text-white/30">
+						<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><polyline points="12,6 12,12 16,14" /></svg>
+						{autoAdvanceCountdown}s
+					</span>
+				{/if}
 			</div>
 
 			<!-- Close FAB -->
@@ -3766,7 +4034,7 @@
 					<!-- Current slide -->
 					<div class="flex-1 min-h-0 flex items-center justify-center">
 						{#if currentSlide}
-							<div class="relative h-full" style="aspect-ratio:16/10;max-width:100%;max-height:100%">
+							<div class="relative w-full max-h-full" style="aspect-ratio:16/10">
 								<div class="absolute inset-0 bg-slate-900 overflow-hidden rounded-lg shadow-2xl ring-1 ring-white/10" style="{currentSlide.bgColor ? `background-color:${currentSlide.bgColor}` : ''}{currentSlide.bgImage ? `;background-image:url(${currentSlide.bgImage});background-size:cover;background-position:center` : ''}">
 									{#each currentSlide.textboxes as tb}
 										<div class="absolute overflow-hidden" style="left:{tb.x}%;top:{tb.y}%;width:{tb.width}%;min-height:{tb.height}%;background:{tb.bgColor && tb.bgColor !== 'transparent' ? tb.bgColor : 'transparent'}">
@@ -4013,121 +4281,148 @@
 							</div>
 						{:else}
 							{#each presenterNotes as n (n.id)}
-								<div class="rounded-lg ring-1 ring-slate-800 group overflow-hidden" style="background:{n.bgColor && n.bgColor !== 'transparent' ? n.bgColor : 'rgb(15 23 42 / 0.6)'}">
-									{#if editingNoteId === n.id}
-										<!-- Edit mode -->
-										<div class="p-3">
-											<textarea
-												class="w-full bg-slate-800/80 text-sm rounded px-2 py-1.5 outline-none ring-1 ring-indigo-500 resize-none min-h-[60px]"
-												style="color:{n.textColor ?? '#e2e8f0'};text-align:{n.align ?? 'left'}"
-												bind:value={n.text}
-												onkeydown={(e) => { if (e.key === 'Escape') { editingNoteId = null; noteColorTarget = null; } }}
-											></textarea>
-											<!-- Formatting toolbar -->
-											<div class="flex items-center gap-1 mt-2 flex-wrap">
-												<!-- Alignment buttons -->
-												<div class="flex items-center rounded-lg bg-slate-800/80 p-0.5 gap-0.5">
-													<button class="p-1.5 rounded transition-colors {(n.align ?? 'left') === 'left' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white'}" onclick={() => { n.align = 'left'; }} title="Align left">
-														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17 10H3M21 6H3M21 14H3M17 18H3" /></svg>
-													</button>
-													<button class="p-1.5 rounded transition-colors {n.align === 'center' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white'}" onclick={() => { n.align = 'center'; }} title="Align center">
-														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 10H6M21 6H3M21 14H3M18 18H6" /></svg>
-													</button>
-													<button class="p-1.5 rounded transition-colors {n.align === 'right' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white'}" onclick={() => { n.align = 'right'; }} title="Align right">
-														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 10H7M21 6H3M21 14H3M21 18H7" /></svg>
-													</button>
-												</div>
-												<!-- Text color -->
-												<div class="relative" data-note-colors>
-													<button
-														class="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium bg-slate-800/80 transition-colors {noteColorTarget?.noteId === n.id && noteColorTarget?.field === 'textColor' ? 'text-indigo-300 ring-1 ring-indigo-500' : 'text-slate-400 hover:text-white'}"
-														onclick={() => { noteColorTarget = noteColorTarget?.noteId === n.id && noteColorTarget?.field === 'textColor' ? null : { noteId: n.id, field: 'textColor' }; }}
-														title="Text color"
-													>
-														<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3l6.5 13H5.5L12 3z" /><path d="M3 20h18" stroke={n.textColor ?? '#e2e8f0'} stroke-width="3" /></svg>
-														<span>Text</span>
-													</button>
-													{#if noteColorTarget?.noteId === n.id && noteColorTarget?.field === 'textColor'}
-														<div class="absolute bottom-full left-0 mb-2 p-2 bg-slate-800 rounded-lg ring-1 ring-slate-700 shadow-xl z-10 grid grid-cols-8 gap-1 w-52" data-note-colors>
-															{#each noteColorSwatches.filter(c => c !== 'transparent') as color}
-																<button
-																	class="w-5 h-5 rounded-full ring-1 ring-white/10 hover:ring-white/40 transition-all {n.textColor === color ? 'ring-2 ring-indigo-400 scale-110' : ''}"
-																	style="background:{color}"
-																	onclick={() => { n.textColor = color; noteColorTarget = null; }}
-																></button>
-															{/each}
-														</div>
-													{/if}
-												</div>
-												<!-- Background color -->
-												<div class="relative" data-note-colors>
-													<button
-														class="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium bg-slate-800/80 transition-colors {noteColorTarget?.noteId === n.id && noteColorTarget?.field === 'bgColor' ? 'text-indigo-300 ring-1 ring-indigo-500' : 'text-slate-400 hover:text-white'}"
-														onclick={() => { noteColorTarget = noteColorTarget?.noteId === n.id && noteColorTarget?.field === 'bgColor' ? null : { noteId: n.id, field: 'bgColor' }; }}
-														title="Background color"
-													>
-														<div class="w-3.5 h-3.5 rounded border border-slate-500" style="background:{n.bgColor && n.bgColor !== 'transparent' ? n.bgColor : 'transparent'}"></div>
-														<span>Fill</span>
-													</button>
-													{#if noteColorTarget?.noteId === n.id && noteColorTarget?.field === 'bgColor'}
-														<div class="absolute bottom-full left-0 mb-2 p-2 bg-slate-800 rounded-lg ring-1 ring-slate-700 shadow-xl z-10 grid grid-cols-8 gap-1 w-52" data-note-colors>
-															{#each noteColorSwatches as color}
-																<button
-																	class="w-5 h-5 rounded-full ring-1 ring-white/10 hover:ring-white/40 transition-all {(n.bgColor ?? 'transparent') === color ? 'ring-2 ring-indigo-400 scale-110' : ''}"
-																	style="background:{color === 'transparent' ? 'repeating-conic-gradient(#334155 0% 25%, transparent 0% 50%) 50%/8px 8px' : color}"
-																	onclick={() => { n.bgColor = color; noteColorTarget = null; }}
-																	title={color === 'transparent' ? 'Transparent' : color}
-																></button>
-															{/each}
-														</div>
-													{/if}
-												</div>
-												<div class="flex-1"></div>
-												<!-- Done editing -->
-												<button
-													class="px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-500 text-white hover:bg-indigo-400 transition-colors"
-													onclick={() => { editingNoteId = null; noteColorTarget = null; }}
-												>Done</button>
-											</div>
+								<div class="rounded-lg ring-1 overflow-hidden {editingNoteId === n.id ? 'ring-indigo-500' : 'ring-slate-800'}" style="background:{n.bgColor && n.bgColor !== 'transparent' ? n.bgColor : 'rgb(15 23 42 / 0.6)'}">
+									<!-- Title row (always visible, click to expand) -->
+									<!-- svelte-ignore a11y_no_static_element_interactions -->
+									<div
+										class="w-full flex items-center gap-2 p-3 {n.description ? 'cursor-pointer' : ''}"
+										onclick={() => { if (n.description) expandedNoteId = expandedNoteId === n.id ? null : n.id; }}
+									>
+										<svg class="w-3.5 h-3.5 shrink-0 transition-transform {n.description ? 'text-slate-500' : 'invisible'} {expandedNoteId === n.id ? 'rotate-90' : ''}" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7" /></svg>
+										<span class="flex-1 text-sm font-medium truncate" style="color:{n.textColor ?? '#e2e8f0'}">{n.title}</span>
+										<!-- svelte-ignore a11y_no_static_element_interactions -->
+										<div class="flex items-center gap-1 shrink-0" onclick={(e) => e.stopPropagation()}>
+											<button
+												class="p-1 rounded-md transition-colors {editingNoteId === n.id ? 'text-indigo-400 bg-indigo-500/20' : 'text-slate-500 hover:text-indigo-400 hover:bg-slate-800/60'}"
+												onclick={() => { editingNoteId = editingNoteId === n.id ? null : n.id; showAddNote = false; noteColorTarget = null; }}
+												title="Edit note"
+											>
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
+											</button>
+											<button
+												class="p-1 text-slate-500 hover:text-red-400 transition-colors rounded-md hover:bg-slate-800/60"
+												onclick={() => deletePresenterNote(n.id)}
+												title="Delete note"
+											>
+												<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" /></svg>
+											</button>
 										</div>
-									{:else}
-										<!-- View mode -->
-										<div class="flex items-start gap-3 p-3">
+									</div>
+									<!-- Description (expanded) -->
+									{#if expandedNoteId === n.id && n.description}
+										<div class="px-3 pb-3 pt-0">
 											<p
-												class="flex-1 text-sm leading-relaxed whitespace-pre-wrap"
-												style="color:{n.textColor ?? '#e2e8f0'};text-align:{n.align ?? 'left'}"
-											>{n.text}</p>
-											<div class="flex items-center gap-1 shrink-0">
-												<button
-													class="p-1.5 text-slate-500 hover:text-indigo-400 transition-colors rounded-md hover:bg-slate-800/60"
-													onclick={() => { editingNoteId = n.id; }}
-													title="Edit note"
-												>
-													<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
-												</button>
-												<button
-													class="p-1.5 text-slate-500 hover:text-red-400 transition-colors rounded-md hover:bg-slate-800/60"
-													onclick={() => deletePresenterNote(n.id)}
-													title="Delete note"
-												>
-													<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" /></svg>
-												</button>
-											</div>
+												class="text-sm leading-relaxed whitespace-pre-wrap pl-5.5"
+												style="color:{n.textColor ?? '#e2e8f0'};text-align:{n.align ?? 'left'};opacity:0.8"
+											>{n.description}</p>
 										</div>
 									{/if}
 								</div>
 							{/each}
 						{/if}
 					</div>
-					<!-- Add note panel / FAB -->
-					{#if showAddNote}
-						<div class="p-4 border-t border-slate-800 bg-slate-900/60">
+					<!-- Bottom panel: edit note / add note / FAB -->
+					{#if editingNoteId !== null}
+						{@const editNote = presenterNotes.find(n => n.id === editingNoteId)}
+						{#if editNote}
+							<div class="p-4 border-t border-slate-800 bg-slate-900/60 space-y-2">
+								<input
+									type="text"
+									class="w-full bg-slate-800 text-sm font-medium rounded-lg px-3 py-2 outline-none ring-1 ring-slate-700 focus:ring-indigo-500 placeholder:text-slate-500"
+									style="color:{editNote.textColor ?? '#e2e8f0'}"
+									placeholder="Title"
+									bind:value={editNote.title}
+									onkeydown={(e) => { if (e.key === 'Escape') { editingNoteId = null; noteColorTarget = null; } }}
+								/>
+								<textarea
+									class="w-full bg-slate-800 text-sm rounded-lg px-3 py-2 outline-none ring-1 ring-slate-700 focus:ring-indigo-500 placeholder:text-slate-500 resize-none min-h-[60px]"
+									style="color:{editNote.textColor ?? '#e2e8f0'};text-align:{editNote.align ?? 'left'}"
+									placeholder="Description (optional)"
+									bind:value={editNote.description}
+									onkeydown={(e) => { if (e.key === 'Escape') { editingNoteId = null; noteColorTarget = null; } }}
+								></textarea>
+								<div class="flex items-center gap-1 mt-2 flex-wrap">
+									<!-- Alignment -->
+									<div class="flex items-center rounded-lg bg-slate-800/80 p-0.5 gap-0.5">
+										<button class="p-1.5 rounded transition-colors {(editNote.align ?? 'left') === 'left' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white'}" onclick={() => { editNote.align = 'left'; }} title="Align left">
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17 10H3M21 6H3M21 14H3M17 18H3" /></svg>
+										</button>
+										<button class="p-1.5 rounded transition-colors {editNote.align === 'center' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white'}" onclick={() => { editNote.align = 'center'; }} title="Align center">
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 10H6M21 6H3M21 14H3M18 18H6" /></svg>
+										</button>
+										<button class="p-1.5 rounded transition-colors {editNote.align === 'right' ? 'bg-indigo-500/30 text-indigo-300' : 'text-slate-400 hover:text-white'}" onclick={() => { editNote.align = 'right'; }} title="Align right">
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 10H7M21 6H3M21 14H3M21 18H7" /></svg>
+										</button>
+									</div>
+									<!-- Text color -->
+									<div class="relative" data-note-colors>
+										<button
+											class="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium bg-slate-800/80 transition-colors {noteColorTarget?.noteId === editNote.id && noteColorTarget?.field === 'textColor' ? 'text-indigo-300 ring-1 ring-indigo-500' : 'text-slate-400 hover:text-white'}"
+											onclick={() => { noteColorTarget = noteColorTarget?.noteId === editNote.id && noteColorTarget?.field === 'textColor' ? null : { noteId: editNote.id, field: 'textColor' }; }}
+											title="Text color"
+										>
+											<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3l6.5 13H5.5L12 3z" /><path d="M3 20h18" stroke={editNote.textColor ?? '#e2e8f0'} stroke-width="3" /></svg>
+											<span>Text</span>
+										</button>
+										{#if noteColorTarget?.noteId === editNote.id && noteColorTarget?.field === 'textColor'}
+											<div class="absolute bottom-full left-0 mb-2 p-2 bg-slate-800 rounded-lg ring-1 ring-slate-700 shadow-xl z-10 grid grid-cols-8 gap-1 w-52" data-note-colors>
+												{#each noteColorSwatches.filter(c => c !== 'transparent') as color}
+													<button
+														class="w-5 h-5 rounded-full ring-1 ring-white/10 hover:ring-white/40 transition-all {editNote.textColor === color ? 'ring-2 ring-indigo-400 scale-110' : ''}"
+														style="background:{color}"
+														onclick={() => { editNote.textColor = color; noteColorTarget = null; }}
+													></button>
+												{/each}
+											</div>
+										{/if}
+									</div>
+									<!-- Background color -->
+									<div class="relative" data-note-colors>
+										<button
+											class="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium bg-slate-800/80 transition-colors {noteColorTarget?.noteId === editNote.id && noteColorTarget?.field === 'bgColor' ? 'text-indigo-300 ring-1 ring-indigo-500' : 'text-slate-400 hover:text-white'}"
+											onclick={() => { noteColorTarget = noteColorTarget?.noteId === editNote.id && noteColorTarget?.field === 'bgColor' ? null : { noteId: editNote.id, field: 'bgColor' }; }}
+											title="Background color"
+										>
+											<div class="w-3.5 h-3.5 rounded border border-slate-500" style="background:{editNote.bgColor && editNote.bgColor !== 'transparent' ? editNote.bgColor : 'transparent'}"></div>
+											<span>Fill</span>
+										</button>
+										{#if noteColorTarget?.noteId === editNote.id && noteColorTarget?.field === 'bgColor'}
+											<div class="absolute bottom-full left-0 mb-2 p-2 bg-slate-800 rounded-lg ring-1 ring-slate-700 shadow-xl z-10 grid grid-cols-8 gap-1 w-52" data-note-colors>
+												{#each noteColorSwatches as color}
+													<button
+														class="w-5 h-5 rounded-full ring-1 ring-white/10 hover:ring-white/40 transition-all {(editNote.bgColor ?? 'transparent') === color ? 'ring-2 ring-indigo-400 scale-110' : ''}"
+														style="background:{color === 'transparent' ? 'repeating-conic-gradient(#334155 0% 25%, transparent 0% 50%) 50%/8px 8px' : color}"
+														onclick={() => { editNote.bgColor = color; noteColorTarget = null; }}
+														title={color === 'transparent' ? 'Transparent' : color}
+													></button>
+												{/each}
+											</div>
+										{/if}
+									</div>
+									<div class="flex-1"></div>
+									<button
+										class="px-4 py-1.5 rounded-lg text-xs font-medium bg-indigo-500 text-white hover:bg-indigo-400 transition-colors"
+										onclick={() => { editingNoteId = null; noteColorTarget = null; }}
+									>Done</button>
+								</div>
+							</div>
+						{/if}
+					{:else if showAddNote}
+						<div class="p-4 border-t border-slate-800 bg-slate-900/60 space-y-2">
+							<input
+								type="text"
+								class="w-full bg-slate-800 text-sm font-medium rounded-lg px-3 py-2 outline-none ring-1 ring-slate-700 focus:ring-indigo-500 placeholder:text-slate-500"
+								style="color:{newNoteTextColor}"
+								placeholder="Title"
+								bind:value={newNoteTitle}
+								onkeydown={(e) => { if (e.key === 'Escape') { showAddNote = false; newNoteTitle = ''; newNoteText = ''; noteColorTarget = null; } }}
+							/>
 							<textarea
 								class="w-full bg-slate-800 text-sm rounded-lg px-3 py-2 outline-none ring-1 ring-slate-700 focus:ring-indigo-500 placeholder:text-slate-500 resize-none min-h-[60px]"
 								style="color:{newNoteTextColor};text-align:{newNoteAlign};background:{newNoteBgColor !== 'transparent' ? newNoteBgColor : ''}"
-								placeholder="Type your note..."
+								placeholder="Description (optional)"
 								bind:value={newNoteText}
-								onkeydown={(e) => { if (e.key === 'Escape') { showAddNote = false; newNoteText = ''; noteColorTarget = null; } }}
+								onkeydown={(e) => { if (e.key === 'Escape') { showAddNote = false; newNoteTitle = ''; newNoteText = ''; noteColorTarget = null; } }}
 							></textarea>
 							<div class="flex items-center gap-1 mt-2 flex-wrap">
 								<!-- Alignment -->
@@ -4190,7 +4485,7 @@
 								<div class="flex-1"></div>
 								<button
 									class="px-2 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
-									onclick={() => { showAddNote = false; newNoteText = ''; noteColorTarget = null; }}
+									onclick={() => { showAddNote = false; newNoteTitle = ''; newNoteText = ''; noteColorTarget = null; }}
 								>Cancel</button>
 								<button
 									class="px-4 py-1.5 rounded-lg text-xs font-medium bg-indigo-500 text-white hover:bg-indigo-400 transition-colors"
@@ -4237,7 +4532,7 @@
 				</svg>
 				<span class="text-[11px] font-medium">Questions</span>
 				{#if presenterQuestions.filter(q => !q.answered).length > 0}
-					<span class="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">{presenterQuestions.filter(q => !q.answered).length}</span>
+					<span class="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">{presenterQuestions.filter(q => !q.answered).length}</span>
 				{/if}
 			</button>
 			<button
